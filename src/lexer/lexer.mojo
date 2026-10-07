@@ -9,43 +9,40 @@ def lex(source: String) -> List[Token]:
         var c = source[i]
 
         # Whitespace
-        if c == " " or c == "\n" or c == "\t":
+        if c == " " or c == "\n" or c == "\t" or c == "\r":
             i += 1
             continue
 
         # def
-        if c == "d":
-            if source[i:i + 3] == "def":
-                tokens.append(Token("DEF", "def"))
-                i += 3
-                continue
+        if source[i:i + 3] == "def":
+            tokens.append(Token("DEF", "def"))
+            i += 3
+            continue
 
         # return
-        if c == "r":
-            if source[i:i + 6] == "return":
-                tokens.append(Token("RETURN", "return"))
-                i += 6
-                continue
+        if source[i:i + 6] == "return":
+            tokens.append(Token("RETURN", "return"))
+            i += 6
+            continue
 
         # Int
-        if c == "I":
-            if source[i:i + 3] == "Int":
-                tokens.append(Token("INT", "Int"))
-                i += 3
-                continue
+        if source[i:i + 3] == "Int":
+            tokens.append(Token("INT", "Int"))
+            i += 3
+            continue
 
         # Identifier
-        if c >= "a" and c <= "z":
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_":
             var start = i
 
             while i < len(source):
-                var current = source[i]
+                var ch = source[i]
 
                 if not (
-                    (current >= "a" and current <= "z") or
-                    (current >= "A" and current <= "Z") or
-                    (current >= "0" and current <= "9") or
-                    current == "_"
+                    (ch >= "a" and ch <= "z") or
+                    (ch >= "A" and ch <= "Z") or
+                    (ch >= "0" and ch <= "9") or
+                    ch == "_"
                 ):
                     break
 
@@ -56,14 +53,14 @@ def lex(source: String) -> List[Token]:
             )
             continue
 
-        # Integer
+        # Integer literal
         if c >= "0" and c <= "9":
             var start = i
 
             while i < len(source):
-                var current = source[i]
+                var ch = source[i]
 
-                if current < "0" or current > "9":
+                if ch < "0" or ch > "9":
                     break
 
                 i += 1
@@ -100,15 +97,16 @@ def lex(source: String) -> List[Token]:
             continue
 
         # ->
-        if c == "-":
-            if i + 1 < len(source) and source[i + 1] == ">":
+        if c == "-" and i + 1 < len(source):
+            if source[i + 1] == ">":
                 tokens.append(Token("ARROW", "->"))
                 i += 2
                 continue
 
-        # Unknown
-        tokens.append(Token("UNKNOWN", source[i]))
+        # Anything we don't understand yet
+        tokens.append(Token("UNKNOWN", c))
         i += 1
 
     tokens.append(Token("EOF", ""))
+
     return tokens
