@@ -1,13 +1,19 @@
 from lexer.lexer import lex
+from parser.parser import Parser
 
 
 def main():
     var source = """
-def add(a: Int, b: Int) -> Int:      # Here I am not actually using the example/add.mojo just to make sure we don't misuse the api's, hurting syntax support
+def add(a: Int, b: Int) -> Int:
     return a + b
 """
 
     var tokens = lex(source)
 
-    for token in tokens:
-        token.dump()
+    var parser = Parser(tokens)
+
+    var function = parser.parse()
+
+    print("Function:", function.name)
+    print("Return type:", function.return_type)
+    print("Parameters:", len(function.parameters))
