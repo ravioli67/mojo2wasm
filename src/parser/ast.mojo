@@ -7,16 +7,30 @@ struct Parameter:
         self.type_name = type_name
 
 
+struct IntegerLiteral:
+    var value: Int
+
+    def __init__(out self, value: Int):
+        self.value = value
+
+
+struct VariableExpr:
+    var name: String
+
+    def __init__(out self, name: String):
+        self.name = name
+
+
 struct BinaryExpr:
-    var left: String
+    var left: VariableExpr
     var operator: String
-    var right: String
+    var right: VariableExpr
 
     def __init__(
         out self,
-        left: String,
+        left: VariableExpr,
         operator: String,
-        right: String
+        right: VariableExpr
     ):
         self.left = left
         self.operator = operator
@@ -24,10 +38,10 @@ struct BinaryExpr:
 
 
 struct ReturnStmt:
-    var value: BinaryExpr
+    var expression: BinaryExpr
 
-    def __init__(out self, value: BinaryExpr):
-        self.value = value
+    def __init__(out self, expression: BinaryExpr):
+        self.expression = expression
 
 
 struct Function:
