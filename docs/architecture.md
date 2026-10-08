@@ -22,8 +22,9 @@ Mojo into WebAssembly (`.wasm`) binaries.
 ```
 
 `compiler.mojo` wires the stages together; `mojo_wasm.mojo` is the public
-entry point: `compile(source: String) -> List[UInt8]`. `main.mojo` (repo
-root) is a command-line wrapper around it.
+API (see `docs/api.md`): `compile`, `try_compile`, `validate`,
+`list_functions`, `dump_ast` and more. `main.mojo` (repo root) is a
+command-line wrapper around it.
 
 Every stage reports problems by raising an `Error` whose message starts with
 `Lexer error`, `Parser error`, `Semantic error` or `Emitter error` and
@@ -73,8 +74,8 @@ Rules enforced by the checker:
 
 | Path | Role |
 |------|------|
-| `main.mojo` | Command-line entry: `mojo -I . main.mojo in.mojo out.wasm` |
-| `src/mojo_wasm.mojo` | Public API |
+| `main.mojo` | Command-line entry: `mojo -I . main.mojo build in.mojo out.wasm` (also `hex`, `check`, `functions`, `tokens`, `ast`) |
+| `src/mojo_wasm.mojo` | Public API (documented in `docs/api.md`) |
 | `src/compiler.mojo` | Runs the pipeline |
 | `src/lexer/tokens.mojo` | `Token(kind, lexeme, line)` |
 | `src/lexer/lexer.mojo` | `lex(source) -> List[Token]` |
@@ -83,6 +84,9 @@ Rules enforced by the checker:
 | `src/sema/checker.mojo` | Semantic checks |
 | `src/wasm/types.mojo` | WASM opcodes, section ids, LEB128 encoders |
 | `src/wasm/emitter.mojo` | `Module` to binary |
+| `src/util/hex.mojo` | `to_hex` |
+| `src/util/files.mojo` | `read_file`, `write_file` |
+| `src/util/dump.mojo` | `format_tokens`, `format_module` (used by `dump_tokens` / `dump_ast`) |
 | `src/ir/` | Reserved for a future IR |
 | `examples/` | Sample programs |
 | `tests/` | Expected output (`tests/wasm/*.hex`) and Node helper scripts |
@@ -202,11 +206,12 @@ end
 ## Testing
 
 ```
-mojo -I . main.mojo examples/add.mojo add.wasm
+mojo -I . main.mojo build examples/add.mojo add.wasm
 node tests/compare_hex.js add.wasm tests/wasm/add.hex   # byte-for-byte check
+mojo -I . main.mojo hex examples/add.mojo               # compare with tests/wasm/add.hex by eye
 node tests/run_wasm.js add.wasm add 2 3                 # prints 5
 
-mojo -I . main.mojo examples/fibonacci.mojo fib.wasm
+mojo -I . main.mojo build examples/fibonacci.mojo fib.wasm
 node tests/compare_hex.js fib.wasm tests/wasm/fibonacci.hex
 node tests/run_wasm.js fib.wasm fib 20                  # prints 6765
 node tests/run_wasm.js fib.wasm fib_iter 50             # prints 12586269025
@@ -220,7 +225,7 @@ precedence, `%`, `//`, `*` and forward calls.
 
 ## Roadmap
 
-1. Run all three examples through the Mojo implementation and fix any
+1. Run all examples (including `examples/library_usage.mojo`) through the Mojo implementation and fix any
    Mojo-version syntax differences.
 2. Unit tests per stage under `tests/lexer`, `tests/parser`, `tests/wasm`.
 3. A `Bool` type (variables, parameters, `and` / `or` / `not`), `+=` style
