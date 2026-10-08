@@ -1,2 +1,3 @@
-# somojound
-A sound Library for the MOJO programming language.
+# Mojo2Wasm
+
+The mission of this library is to be able to convert Mojo to Web Assembly
