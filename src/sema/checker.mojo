@@ -41,6 +41,28 @@ def check_expr(module: Module, index: Int, scope: List[String]) raises -> String
             )
         return "Int"
 
+    if expr.kind == "NOT":
+        if check_expr(module, expr.left, scope) != "Bool":
+            raise Error(
+                "Semantic error on line "
+                + String(expr.line)
+                + ": 'not' needs a comparison (like a < b)"
+            )
+        return "Bool"
+
+    if expr.kind == "LOGIC":
+        var left_type = check_expr(module, expr.left, scope)
+        var right_type = check_expr(module, expr.right, scope)
+        if left_type != "Bool" or right_type != "Bool":
+            raise Error(
+                "Semantic error on line "
+                + String(expr.line)
+                + ": '"
+                + expr.op
+                + "' needs a comparison on both sides"
+            )
+        return "Bool"
+
     if expr.kind == "BINARY":
         var left_type = check_expr(module, expr.left, scope)
         var right_type = check_expr(module, expr.right, scope)
@@ -97,12 +119,13 @@ def check_expr(module: Module, index: Int, scope: List[String]) raises -> String
 
 
 def check_block(
-    module: Module, body: List[Int], mut scope: List[String]
+    module: Module, body: List[Int], mut scope: List[String], in_loop: Bool
 ) raises:
     """Checks a list of statements.
 
     Variables live for the whole function once declared (no block scopes
     yet), so `scope` just keeps growing as `var` statements are seen.
+    `in_loop` is True inside a `while` body (where break/continue are legal).
     """
     for i in range(len(body)):
         var stmt = module.stmts[body[i]].copy()
@@ -115,6 +138,16 @@ def check_block(
                     + ": return needs an Int value"
                 )
 
+        elif stmt.kind == "BREAK" or stmt.kind == "CONTINUE":
+            if not in_loop:
+                raise Error(
+                    "Semantic error on line "
+                    + String(stmt.line)
+                    + ": '"
+                    + stmt.kind.lower()
+                    + "' outside of a loop"
+                )
+
         elif stmt.kind == "IF" or stmt.kind == "WHILE":
             if check_expr(module, stmt.expr, scope) != "Bool":
                 raise Error(
@@ -122,8 +155,11 @@ def check_block(
                     + String(stmt.line)
                     + ": the condition must be a comparison (like a < b)"
                 )
-            check_block(module, stmt.body, scope)
-            check_block(module, stmt.else_body, scope)
+            if stmt.kind == "WHILE":
+                check_block(module, stmt.body, scope, True)
+            else:
+                check_block(module, stmt.body, scope, in_loop)
+                check_block(module, stmt.else_body, scope, in_loop)
 
         elif stmt.kind == "VAR":
             if contains(scope, stmt.name):
@@ -231,7 +267,7 @@ def check(module: Module) raises:
                 )
             scope.append(parameter.name)
 
-        check_block(module, function.body, scope)
+        check_block(module, function.body, scope, False)
 
         if not always_returns(module, function.body):
             raise Error(

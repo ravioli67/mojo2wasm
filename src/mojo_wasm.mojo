@@ -1,3 +1,15 @@
+"""mojo_wasm public API.
+
+Everything a library user needs is importable from this one module:
+
+    from src.mojo_wasm import compile, try_compile, validate
+
+Functions that can fail are marked `raises` and raise an `Error` whose
+message starts with `Lexer error`, `Parser error`, `Semantic error` or
+`Emitter error`. If you would rather not use try/except, use
+`try_compile` or `validate`, which return the error as a value instead.
+"""
+
 from .compiler import Compiler
 from .lexer.lexer import lex
 from .lexer.tokens import Token
@@ -12,7 +24,7 @@ from .util.dump import format_module
 
 
 def version() -> String:
-    return "0.2.0"
+    return "0.3.0"
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +91,22 @@ def try_compile(source: String) -> CompileResult:
         return CompileResult(True, wasm, "")
     except e:
         return CompileResult(False, List[UInt8](), String(e))
+
+
+def compile_unoptimized(source: String) raises -> List[UInt8]:
+    """Like `compile`, but skips constant folding (handy for debugging)."""
+    var compiler = Compiler()
+    return compiler.compile_with(source, False)
+
+
+def compile_to_wat(source: String) raises -> String:
+    """Compiles to WebAssembly text format (WAT) instead of bytes.
+
+    The text describes exactly the same program as `compile` produces, and
+    can be fed to tools such as `wat2wasm`.
+    """
+    var compiler = Compiler()
+    return compiler.compile_wat(source, True)
 
 
 def compile_to_hex(source: String) raises -> String:

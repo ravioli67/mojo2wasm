@@ -6,11 +6,15 @@ from .ast import int_expr
 from .ast import var_expr
 from .ast import binary_expr
 from .ast import call_expr
+from .ast import logic_expr
+from .ast import not_expr
 from .ast import return_stmt
 from .ast import if_stmt
 from .ast import while_stmt
 from .ast import var_stmt
 from .ast import assign_stmt
+from .ast import break_stmt
+from .ast import continue_stmt
 
 
 def is_comparison(kind: String) -> Bool:
@@ -22,6 +26,21 @@ def is_comparison(kind: String) -> Bool:
         or kind == "EQ"
         or kind == "NE"
     )
+
+
+def compound_op(kind: String) -> String:
+    """The operator behind `+=`, `-=`, ... or "" if `kind` is not one."""
+    if kind == "PLUSEQ":
+        return "+"
+    if kind == "MINUSEQ":
+        return "-"
+    if kind == "STAREQ":
+        return "*"
+    if kind == "SLASHSLASHEQ":
+        return "//"
+    if kind == "PERCENTEQ":
+        return "%"
+    return ""
 
 
 struct Parser:
@@ -39,11 +58,17 @@ struct Parser:
                       | "while" expr ":" block
                       | "var" IDENT [":" "Int"] "=" expr NEWLINE
                       | IDENT "=" expr NEWLINE
+                      | IDENT ("+=" | "-=" | "*=" | "//=" | "%=") expr NEWLINE
+                      | "break" NEWLINE
+                      | "continue" NEWLINE
       if             := ("if" | "elif") expr ":" block
                         [ if_tail ]
       if_tail        := "elif" ...   |   "else" ":" block
 
-      expr           := additive [("<"|"<="|">"|">="|"=="|"!=") additive]
+      expr           := and_expr ("or" and_expr)*
+      and_expr       := not_expr ("and" not_expr)*
+      not_expr       := "not" not_expr | comparison
+      comparison     := additive [("<"|"<="|">"|">="|"=="|"!=") additive]
       additive       := multiplicative (("+"|"-") multiplicative)*
       multiplicative := unary (("*"|"//"|"%") unary)*
       unary          := "-" unary | primary
@@ -171,6 +196,16 @@ struct Parser:
             _ = self.expect("NEWLINE")
             return self.module.add_stmt(return_stmt(value, line))
 
+        if kind == "BREAK":
+            _ = self.advance()
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(break_stmt(line))
+
+        if kind == "CONTINUE":
+            _ = self.advance()
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(continue_stmt(line))
+
         if kind == "IF":
             return self.parse_if()
 
@@ -198,6 +233,18 @@ struct Parser:
             var value = self.parse_expr()
             _ = self.expect("NEWLINE")
             return self.module.add_stmt(assign_stmt(name, value, line))
+
+        if kind == "IDENTIFIER" and compound_op(self.peek_at(1).kind) != "":
+            # `x += e` becomes `x = x + e`
+            var name = self.advance().lexeme
+            var op = compound_op(self.advance().kind)
+            var value = self.parse_expr()
+            _ = self.expect("NEWLINE")
+            var current = self.module.add_expr(var_expr(name, line))
+            var combined = self.module.add_expr(
+                binary_expr(op, current, value, line)
+            )
+            return self.module.add_stmt(assign_stmt(name, combined, line))
 
         raise Error(
             "Parser error on line "
@@ -228,6 +275,41 @@ struct Parser:
     # ---- Expressions (each returns an index into Module.exprs) ------------
 
     def parse_expr(mut self) raises -> Int:
+        return self.parse_or()
+
+    def parse_or(mut self) raises -> Int:
+        var left = self.parse_and()
+
+        while self.check("OR"):
+            var operator = self.advance()
+            var right = self.parse_and()
+            left = self.module.add_expr(
+                logic_expr("or", left, right, operator.line)
+            )
+
+        return left
+
+    def parse_and(mut self) raises -> Int:
+        var left = self.parse_not()
+
+        while self.check("AND"):
+            var operator = self.advance()
+            var right = self.parse_not()
+            left = self.module.add_expr(
+                logic_expr("and", left, right, operator.line)
+            )
+
+        return left
+
+    def parse_not(mut self) raises -> Int:
+        if self.check("NOT"):
+            var line = self.advance().line
+            var operand = self.parse_not()
+            return self.module.add_expr(not_expr(operand, line))
+
+        return self.parse_comparison()
+
+    def parse_comparison(mut self) raises -> Int:
         var left = self.parse_additive()
 
         if is_comparison(self.peek().kind):

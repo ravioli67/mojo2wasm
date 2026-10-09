@@ -1,4 +1,4 @@
-# mojo2wasm Architecture
+# mojo_wasm Architecture
 
 mojo_wasm is a compiler written in Mojo that translates a small subset of
 Mojo into WebAssembly (`.wasm`) binaries.
@@ -16,9 +16,12 @@ Mojo into WebAssembly (`.wasm`) binaries.
      │  sema/checker.mojo
      ▼
  validated Module
-     │  wasm/emitter.mojo
+     │  opt/fold.mojo         (constant folding, optional)
      ▼
- .wasm bytes (List[UInt8])
+ optimized Module
+     │  wasm/emitter.mojo     (binary)     or     wasm/wat.mojo  (text)
+     ▼                                              ▼
+ .wasm bytes (List[UInt8])                      WAT source (String)
 ```
 
 `compiler.mojo` wires the stages together; `mojo_wasm.mojo` is the public
@@ -54,21 +57,27 @@ def fib_iter(n: Int) -> Int:
 |---------|-------|
 | Types | `Int` only (64-bit, signed). Maps to WASM `i64`. |
 | Functions | Any number per file, any order. Calls (including recursion and forward calls) are supported. |
-| Statements | `return`, `if` / `elif` / `else`, `while`, `var x = e` (optionally `var x: Int = e`), `x = e` |
-| Operators | `+ - * // %` (arithmetic), `< <= > >= == !=` (comparison), unary `-`, parentheses |
+| Statements | `return`, `if` / `elif` / `else`, `while`, `break`, `continue`, `var x = e` (optionally `var x: Int = e`), `x = e`, and `x += e` (also `-=`, `*=`, `//=`, `%=`) |
+| Operators | `+ - * // %` (arithmetic), `< <= > >= == !=` (comparison), `and` `or` `not` (logic), unary `-`, parentheses |
 | Comments | `#` to end of line |
 | Blocks | Indentation-based, like Python (a tab counts as 4 spaces) |
 
 Rules enforced by the checker:
 
-- A comparison produces a Bool; Bools may only be used as the condition of
-  `if` / `while` (there are no Bool variables or parameters yet).
+- A comparison produces a Bool, and `and` / `or` / `not` combine Bools.
+  Bools may only be used as the condition of `if` / `while` (there are no
+  Bool variables or parameters yet), so `if a:` and `a + (b < c)` are errors.
+- `and` / `or` short-circuit: the right side is only evaluated when needed,
+  so `n > 0 and 10 // n >= 2` is safe when `n` is 0.
+- `break` and `continue` are only allowed inside a `while` body.
 - Variables are function-wide: once declared with `var`, a name is visible to
   the rest of the function, including after the block it was declared in.
   Declaring the same name twice is an error.
 - Every function must return on every path.
-- `//` and `%` use signed truncating division (WASM `i64.div_s` / `i64.rem_s`),
-  and trap at runtime on division by zero.
+- `//` and `%` use floor semantics like Mojo and Python: `-7 // 2` is `-4`
+  and `-7 % 3` is `2`. Division by zero traps at runtime. (WASM's own
+  `i64.div_s` / `i64.rem_s` truncate toward zero, so programs that use these
+  operators get small helper functions; see "Floor division" below.)
 
 ## Directory layout
 
@@ -84,7 +93,9 @@ Rules enforced by the checker:
 | `src/sema/checker.mojo` | Semantic checks |
 | `src/wasm/types.mojo` | WASM opcodes, section ids, LEB128 encoders |
 | `src/wasm/emitter.mojo` | `Module` to binary |
-| `src/util/hex.mojo` | `to_hex` |
+| `src/opt/fold.mojo` | Constant folding |
+| `src/wasm/wat.mojo` | `Module` to WAT text |
+| `src/util/hex.mojo` | `to_hex`, `from_hex` |
 | `src/util/files.mojo` | `read_file`, `write_file` |
 | `src/util/dump.mojo` | `format_tokens`, `format_module` (used by `dump_tokens` / `dump_ast`) |
 | `src/ir/` | Reserved for a future IR |
@@ -139,7 +150,17 @@ Module
 Walks every function with a growing list of names in scope (parameters first).
 It computes a type (`Int` or `Bool`) for each expression and verifies:
 declared names, function names and argument counts, operand types, condition
-types, duplicate declarations, and that all paths return.
+types, duplicate declarations, `break` / `continue` placement, and that all
+paths return.
+
+### Optimizer
+`opt/fold.mojo` makes one pass over the expression arena. Because the parser
+creates a node's children before the node, a forward pass folds bottom-up:
+`2 + 3 * 4` becomes `14` and `-5` (parsed as `0 - 5`) becomes `-5`. Only
+`+ - * // %` on two integer literals is folded, using the same floor
+semantics as the runtime. A division by zero is left alone so the program
+traps when run instead of failing to compile. Use `compile_unoptimized` to
+skip this pass.
 
 ### WASM emitter
 Function `i` in the source becomes WASM function `i` and is exported under
@@ -150,8 +171,11 @@ its source name. Sections, in order:
 | header | | `00 61 73 6D` + version `01 00 00 00` |
 | type | 1 | one signature `(i64 × n) -> i64` per function |
 | function | 3 | function `i` uses type `i` |
-| export | 7 | every function, by name |
+| export | 7 | every source function, by name |
 | code | 10 | one body per function |
+
+If the program uses `//` and/or `%`, one or two helper functions follow the
+user's functions (not exported); see "Floor division" below.
 
 A body starts with its local declarations (all `var`s collected in advance,
 numbered after the parameters), then the statements, then `unreachable` and
@@ -166,7 +190,37 @@ x = e / var x   e ; local.set x
 if c: A else: B c ; if A else B end
 while c: A      block  loop  c ; i32.eqz ; br_if 1 ;  A ; br 0  end end
 f(a, b)         a ; b ; call <index of f>
+not c           c ; i32.eqz
+a and b         a ; if (result i32)  b  else  i32.const 0  end
+a or b          a ; if (result i32)  i32.const 1  else  b  end
+break           br <depth of the loop's outer block>
+continue        br <depth of the loop's loop>
 ```
+
+`break` and `continue` branch by *depth*: inside a `while` body, `br 1`
+leaves the `block` and `br 0` jumps to the `loop` top. Every `if` entered
+adds one level, so the emitter tracks the two depths and increases them by
+one for each nested `if`.
+
+### Floor division
+Mojo's `//` and `%` round toward negative infinity, but WASM's `i64.div_s` /
+`i64.rem_s` truncate toward zero (`-7 // 2` would give `-3`, not `-4`). The
+emitter appends two small functions when needed:
+
+```
+floordiv(a, b):  q = a / b ;  if (a % b != 0) and ((a ^ b) < 0):  q - 1  else q
+floormod(a, b):  r = a % b ;  if (r != 0)     and ((r ^ b) < 0):  r + b  else r
+```
+
+Their indices come right after the user's functions (floordiv first, if used).
+
+### WAT output
+`wasm/wat.mojo` lowers the same constructs to the WebAssembly text format in
+flat style, one instruction per line, with names instead of indices
+(`local.get $n`, `call $fib`). Every function is exported by name and ends
+with `unreachable`, mirroring the binary emitter. The text of every example
+is in `tests/wasm/*.wat`, and each was checked to assemble to bytes identical
+to the binary emitter's output.
 
 Comparisons produce a WASM `i32`, which is exactly what `if` and `br_if`
 consume. Sizes, counts and indices use unsigned LEB128; `i64.const`
@@ -217,22 +271,39 @@ node tests/run_wasm.js fib.wasm fib 20                  # prints 6765
 node tests/run_wasm.js fib.wasm fib_iter 50             # prints 12586269025
 ```
 
-The `.hex` files were produced by a reference implementation of exactly this
+Behaviour tests (460 checks: fib, gcd, primes, collatz, floor division with
+negative numbers, short-circuiting, `break` / `continue`, constant folding):
+
+```
+mojo -I . main.mojo build examples/fibonacci.mojo build/fibonacci.wasm
+mojo -I . main.mojo build examples/features.mojo  build/features.wasm
+mojo -I . main.mojo build examples/logic.mojo     build/logic.wasm
+node tests/behavior.js build
+```
+
+WAT output can be compared with `tests/wasm/*.wat`:
+
+```
+mojo -I . main.mojo wat examples/fibonacci.mojo
+```
+
+The `.hex` and `.wat` files were produced by a reference implementation of exactly this
 design and validated in a real WebAssembly engine, so a mismatch points at a
 bug in the Mojo code (or a Mojo-version syntax difference), not in the design.
 `examples/features.mojo` exercises `while`, `elif`/`else`, unary minus,
-precedence, `%`, `//`, `*` and forward calls.
+precedence, `%`, `//`, `*` and forward calls; `examples/logic.mojo` covers
+`and` / `or` / `not`, compound assignment, `break` / `continue`, floor
+division and constant folding.
 
 ## Roadmap
 
 1. Run all examples (including `examples/library_usage.mojo`) through the Mojo implementation and fix any
    Mojo-version syntax differences.
 2. Unit tests per stage under `tests/lexer`, `tests/parser`, `tests/wasm`.
-3. A `Bool` type (variables, parameters, `and` / `or` / `not`), `+=` style
-   assignment, `break` / `continue`.
+3. A real `Bool` type (variables, parameters, return values).
 4. Block-scoped variables with shadowing rules.
 5. More types (`Float64`, `Int32`, `Bool`) and implicit type promotion rules.
-6. An IR in `src/ir/` between the checker and the emitter, enabling
-   optimizations (constant folding, dead code removal) and richer lowering.
+6. An IR in `src/ir/` between the checker and the emitter, enabling more
+   optimizations (dead code removal, strength reduction) and richer lowering.
 7. Replace string token / node kinds with a compact enum-like representation.
 8. Source-level diagnostics: show the offending line with a caret.

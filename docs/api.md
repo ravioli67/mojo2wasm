@@ -27,6 +27,8 @@ If you prefer values to exceptions, use `try_compile` or `validate`.
 |----------|---------|-------------|
 | `compile(source: String)` **raises** | `List[UInt8]` | Compile source to the bytes of a `.wasm` module. |
 | `try_compile(source: String)` | `CompileResult` | Same, but never raises. Check `result.ok`, then use `result.wasm` or `result.error`. |
+| `compile_unoptimized(source: String)` **raises** | `List[UInt8]` | Like `compile` but skips constant folding. |
+| `compile_to_wat(source: String)` **raises** | `String` | Compile to WebAssembly text format (WAT) instead of bytes. |
 | `compile_to_hex(source: String)` **raises** | `String` | Compile and format as hex, e.g. `00 61 73 6d 01 00 00 00 ...`. |
 | `compile_to_file(source: String, output_path: String)` **raises** | `Int` | Compile and write the `.wasm` file. Returns the number of bytes written. |
 | `compile_file(input_path: String, output_path: String)` **raises** | `Int` | Read a source file, compile it, write the `.wasm` file. |
@@ -122,12 +124,32 @@ def fib_iter(n: Int) -> Int
   return a
 ```
 
+## WAT output
+
+`compile_to_wat` for `examples/add.mojo`:
+
+```wat
+(module
+  (func $add (export "add") (param $a i64) (param $b i64) (result i64)
+    local.get $a
+    local.get $b
+    i64.add
+    return
+    unreachable
+  )
+)
+```
+
+`Int` is a 64-bit integer, so JavaScript sees these functions with `BigInt`
+arguments and results (`add(2n, 3n)`).
+
 ## Utilities
 
 | Function | Module | Description |
 |----------|--------|-------------|
 | `version() -> String` | `src.mojo_wasm` | The library version |
 | `to_hex(data: List[UInt8]) -> String` | `src.util.hex` | Bytes as `"00 61 73 ..."` |
+| `from_hex(text: String) raises -> List[UInt8]` | `src.util.hex` | The reverse of `to_hex` |
 | `read_file(path: String) raises -> String` | `src.util.files` | Read a text file |
 | `write_file(path: String, data: List[UInt8]) raises` | `src.util.files` | Write bytes to a file |
 
@@ -138,6 +160,7 @@ def fib_iter(n: Int) -> Int
 ```
 mojo -I . main.mojo build     examples/fibonacci.mojo fib.wasm
 mojo -I . main.mojo hex       examples/add.mojo
+mojo -I . main.mojo wat       examples/fibonacci.mojo
 mojo -I . main.mojo check     examples/features.mojo
 mojo -I . main.mojo functions examples/features.mojo
 mojo -I . main.mojo tokens    examples/add.mojo
