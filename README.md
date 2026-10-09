@@ -28,7 +28,7 @@ The compiler bypasses heavy toolchain dependencies by implementing a custom comp
 This project is a **Work in Progress (WIP)**. 
 
 ### Roadmap:
-- [ ] Lexer & Tokenizer for basic Mojo syntax
+- [x] Lexer & Tokenizer for basic Mojo syntax
 - [ ] AST Node definitions for variables, functions, and control flow
 - [ ] WebAssembly Text Format (`.wat`) emitter
 - [ ] WebAssembly Binary Format (`.wasm`) encoder
