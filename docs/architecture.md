@@ -1,4 +1,4 @@
-# mojo_wasm Architecture
+# mojo2wasm Architecture
 
 mojo_wasm is a compiler written in Mojo that translates a small subset of
 Mojo into WebAssembly (`.wasm`) binaries.
