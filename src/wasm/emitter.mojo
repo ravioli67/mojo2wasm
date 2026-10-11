@@ -1,6 +1,8 @@
 from ..parser.ast import Module
 from ..util.hex import from_hex
 from .types import i64_type
+from .types import f64_type
+from .types import i32_type
 from .types import func_type_tag
 from .types import block_type_empty
 from .types import block_type_i32
@@ -23,7 +25,11 @@ from .types import op_local_get
 from .types import op_local_set
 from .types import op_i32_const
 from .types import op_i64_const
+from .types import op_f64_const
 from .types import op_i32_eqz
+from .types import op_i32_eq
+from .types import op_i32_ne
+from .types import op_i64_eqz
 from .types import op_i64_eq
 from .types import op_i64_ne
 from .types import op_i64_lt_s
@@ -33,6 +39,20 @@ from .types import op_i64_ge_s
 from .types import op_i64_add
 from .types import op_i64_sub
 from .types import op_i64_mul
+from .types import op_f64_eq
+from .types import op_f64_ne
+from .types import op_f64_lt
+from .types import op_f64_gt
+from .types import op_f64_le
+from .types import op_f64_ge
+from .types import op_f64_neg
+from .types import op_f64_add
+from .types import op_f64_sub
+from .types import op_f64_mul
+from .types import op_f64_div
+from .types import op_i64_trunc_f64_s
+from .types import op_i64_extend_i32_u
+from .types import op_f64_convert_i64_s
 from .types import encode_uleb128
 from .types import encode_sleb128
 
@@ -68,28 +88,120 @@ def index_of(names: List[String], name: String) raises -> Int:
     raise Error("Emitter error: unknown variable '" + name + "'")
 
 
-def binary_opcode(op: String) raises -> UInt8:
+def valtype(type_name: String) -> UInt8:
+    """The WASM value type for a source type."""
+    if type_name == "Float64":
+        return f64_type()
+    if type_name == "Bool":
+        return i32_type()
+    return i64_type()
+
+
+def binary_opcode(op: String, operand_type: String) raises -> UInt8:
     """Opcodes for operators that map to a single WASM instruction.
     (`//` and `%` are not here: they call helper functions, see below.)"""
-    if op == "+":
-        return op_i64_add()
-    if op == "-":
-        return op_i64_sub()
-    if op == "*":
-        return op_i64_mul()
-    if op == "==":
-        return op_i64_eq()
-    if op == "!=":
-        return op_i64_ne()
-    if op == "<":
-        return op_i64_lt_s()
-    if op == ">":
-        return op_i64_gt_s()
-    if op == "<=":
-        return op_i64_le_s()
-    if op == ">=":
-        return op_i64_ge_s()
-    raise Error("Emitter error: unsupported operator '" + op + "'")
+    if operand_type == "Float64":
+        if op == "+":
+            return op_f64_add()
+        if op == "-":
+            return op_f64_sub()
+        if op == "*":
+            return op_f64_mul()
+        if op == "/":
+            return op_f64_div()
+        if op == "==":
+            return op_f64_eq()
+        if op == "!=":
+            return op_f64_ne()
+        if op == "<":
+            return op_f64_lt()
+        if op == ">":
+            return op_f64_gt()
+        if op == "<=":
+            return op_f64_le()
+        if op == ">=":
+            return op_f64_ge()
+
+    elif operand_type == "Bool":
+        if op == "==":
+            return op_i32_eq()
+        if op == "!=":
+            return op_i32_ne()
+
+    else:
+        if op == "+":
+            return op_i64_add()
+        if op == "-":
+            return op_i64_sub()
+        if op == "*":
+            return op_i64_mul()
+        if op == "==":
+            return op_i64_eq()
+        if op == "!=":
+            return op_i64_ne()
+        if op == "<":
+            return op_i64_lt_s()
+        if op == ">":
+            return op_i64_gt_s()
+        if op == "<=":
+            return op_i64_le_s()
+        if op == ">=":
+            return op_i64_ge_s()
+
+    raise Error(
+        "Emitter error: unsupported operator '"
+        + op
+        + "' for "
+        + operand_type
+    )
+
+
+def float_bytes(value: Float64) raises -> List[UInt8]:
+    """The 8 little-endian bytes of an IEEE-754 double.
+
+    Computed with plain arithmetic (halving / doubling is exact in binary
+    floating point), so no bit-casting is needed:
+    value = 1.fraction * 2^exponent, with a 52-bit fraction.
+    Literals are never negative zero, so only the sign of non-zero values
+    is handled.
+    """
+    var sign = 0
+    var x = value
+    if x < 0.0:
+        sign = 1
+        x = -x
+
+    var result = List[UInt8]()
+
+    if x == 0.0:
+        for _ in range(7):
+            result.append(0)
+        result.append(UInt8(sign * 128))
+        return result^
+
+    if x > 1.7976931348623157e308:
+        raise Error("Emitter error: floating-point literal is too large")
+
+    var exponent = 0
+    while x >= 2.0:
+        x = x / 2.0
+        exponent += 1
+    while x < 1.0:
+        x = x * 2.0
+        exponent -= 1
+
+    if exponent < -1022:
+        raise Error("Emitter error: floating-point literal is too small")
+
+    var fraction = Int((x - 1.0) * 4503599627370496.0)  # 2^52
+    var biased = exponent + 1023
+
+    for i in range(6):
+        result.append(UInt8((fraction >> (8 * i)) & 255))
+    result.append(UInt8(((fraction >> 48) & 15) | ((biased & 15) << 4)))
+    result.append(UInt8((sign * 128) | (biased >> 4)))
+
+    return result^
 
 
 # ---- Floor division helpers ----------------------------------------------------
@@ -172,15 +284,22 @@ def helper_count(module: Module) -> Int:
 # ---- Locals ------------------------------------------------------------------
 
 
-def collect_locals(module: Module, body: List[Int], mut found: List[String]):
-    """Finds every `var` declaration (in order) so the function header can
-    declare all locals up front. WASM numbers locals after the parameters."""
+def collect_locals(
+    module: Module,
+    body: List[Int],
+    mut names: List[String],
+    mut types: List[String],
+):
+    """Finds every `var` declaration (in order, with its type) so the
+    function header can declare all locals up front. WASM numbers locals
+    after the parameters."""
     for i in range(len(body)):
         var stmt = module.stmts[body[i]].copy()
         if stmt.kind == "VAR":
-            found.append(stmt.name)
-        collect_locals(module, stmt.body, found)
-        collect_locals(module, stmt.else_body, found)
+            names.append(stmt.name)
+            types.append(stmt.type_name)
+        collect_locals(module, stmt.body, names, types)
+        collect_locals(module, stmt.else_body, names, types)
 
 
 # ---- Expressions and statements ----------------------------------------------
@@ -194,6 +313,38 @@ def emit_expr(
     if expr.kind == "INT":
         code.append(op_i64_const())
         append_all(code, encode_sleb128(expr.value))
+
+    elif expr.kind == "FLOAT":
+        code.append(op_f64_const())
+        append_all(code, float_bytes(expr.fvalue))
+
+    elif expr.kind == "BOOL":
+        code.append(op_i32_const())
+        append_all(code, encode_sleb128(expr.value))
+
+    elif expr.kind == "NEG":
+        if expr.etype == "Int":
+            # -x  ->  0 - x
+            code.append(op_i64_const())
+            append_all(code, encode_sleb128(0))
+            emit_expr(module, code, names, expr.left)
+            code.append(op_i64_sub())
+        else:
+            emit_expr(module, code, names, expr.left)
+            code.append(op_f64_neg())
+
+    elif expr.kind == "CAST":
+        emit_expr(module, code, names, expr.left)
+        var source_type = module.exprs[expr.left].etype
+        if expr.name == "Float64" and source_type == "Int":
+            code.append(op_f64_convert_i64_s())
+        elif expr.name == "Int" and source_type == "Float64":
+            code.append(op_i64_trunc_f64_s())
+        elif expr.name == "Int" and source_type == "Bool":
+            code.append(op_i64_extend_i32_u())
+        elif expr.name == "Bool" and source_type == "Int":
+            code.append(op_i64_eqz())  # x == 0
+            code.append(op_i32_eqz())  # ... so x != 0
 
     elif expr.kind == "VAR":
         code.append(op_local_get())
@@ -232,7 +383,9 @@ def emit_expr(
                 code, encode_uleb128(helper_index(module, expr.op))
             )
         else:
-            code.append(binary_opcode(expr.op))
+            code.append(
+                binary_opcode(expr.op, module.exprs[expr.left].etype)
+            )
 
     else:  # CALL: push the arguments, then call by function index
         for i in range(len(expr.args)):
@@ -351,10 +504,10 @@ def emit(module: Module) raises -> List[UInt8]:
         var parameter_count = len(module.functions[f].parameters)
         types.append(func_type_tag())
         append_all(types, encode_uleb128(parameter_count))
-        for _ in range(parameter_count):
-            types.append(i64_type())
+        for p in range(parameter_count):
+            types.append(valtype(module.functions[f].parameters[p].type_name))
         types.append(1)  # one result
-        types.append(i64_type())
+        types.append(valtype(module.functions[f].return_type))
     for _ in range(helpers):  # helpers are all (i64, i64) -> i64
         types.append(func_type_tag())
         types.append(2)
@@ -391,7 +544,8 @@ def emit(module: Module) raises -> List[UInt8]:
 
         # Local numbering: parameters first, then `var` declarations.
         var declared = List[String]()
-        collect_locals(module, function.body, declared)
+        var declared_types = List[String]()
+        collect_locals(module, function.body, declared, declared_types)
 
         var names = List[String]()
         for p in range(len(function.parameters)):
@@ -401,13 +555,22 @@ def emit(module: Module) raises -> List[UInt8]:
 
         var body = List[UInt8]()
 
-        # Local declarations: one group of `n` i64 locals (or none).
-        if len(declared) > 0:
-            body.append(1)
-            append_all(body, encode_uleb128(len(declared)))
-            body.append(i64_type())
-        else:
-            body.append(0)
+        # Local declarations: consecutive locals of the same type share one
+        # group `(count, type)`.
+        var group_counts = List[Int]()
+        var group_types = List[String]()
+        for d in range(len(declared_types)):
+            var last = len(group_types) - 1
+            if last >= 0 and group_types[last] == declared_types[d]:
+                group_counts[last] += 1
+            else:
+                group_counts.append(1)
+                group_types.append(declared_types[d])
+
+        append_all(body, encode_uleb128(len(group_types)))
+        for g in range(len(group_types)):
+            append_all(body, encode_uleb128(group_counts[g]))
+            body.append(valtype(group_types[g]))
 
         emit_block(module, body, names, function.body, -1, -1)
 

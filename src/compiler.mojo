@@ -5,6 +5,7 @@ from .sema.checker import check
 from .opt.fold import fold_constants
 from .wasm.emitter import emit
 from .wasm.wat import emit_wat
+from .util.diagnostics import add_source_context
 
 
 struct Compiler:
@@ -12,22 +13,29 @@ struct Compiler:
         pass
 
     def analyze(self, source: String, optimize: Bool) raises -> Module:
-        """Runs the front end: lex, parse, check, and (optionally) optimize."""
-        # 1. Source -> tokens (including INDENT / DEDENT / NEWLINE)
-        var tokens = lex(source)
+        """Runs the front end: lex, parse, check, and (optionally) optimize.
 
-        # 2. Tokens -> AST
-        var parser = Parser(tokens)
-        var module = parser.parse()
+        Any error is re-raised with the offending source line and carets
+        added (see util/diagnostics.mojo).
+        """
+        try:
+            # 1. Source -> tokens (including INDENT / DEDENT / NEWLINE)
+            var tokens = lex(source)
 
-        # 3. Semantic checks (raises on the first error)
-        check(module)
+            # 2. Tokens -> AST
+            var parser = Parser(tokens)
+            var module = parser.parse()
 
-        # 4. Constant folding
-        if optimize:
-            fold_constants(module)
+            # 3. Semantic checks and type annotation (raises on the first error)
+            check(module)
 
-        return module^
+            # 4. Constant folding
+            if optimize:
+                fold_constants(module)
+
+            return module^
+        except e:
+            raise Error(add_source_context(source, String(e)))
 
     def compile(self, source: String) raises -> List[UInt8]:
         return self.compile_with(source, True)

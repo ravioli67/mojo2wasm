@@ -1,4 +1,5 @@
 from .tokens import Token
+from ..util.diagnostics import error_at
 
 
 def is_letter_or_underscore(c: String) -> Bool:
@@ -25,8 +26,26 @@ def keyword_kind(word: String) -> String:
         return "WHILE"
     if word == "var":
         return "VAR"
+    if word == "and":
+        return "AND"
+    if word == "or":
+        return "OR"
+    if word == "not":
+        return "NOT"
+    if word == "break":
+        return "BREAK"
+    if word == "continue":
+        return "CONTINUE"
+    if word == "True":
+        return "TRUE"
+    if word == "False":
+        return "FALSE"
     if word == "Int":
         return "INT"
+    if word == "Float64":
+        return "FLOAT64"
+    if word == "Bool":
+        return "BOOL"
     return ""
 
 
@@ -46,6 +65,8 @@ def single_char_kind(c: String) -> String:
         return "MINUS"
     if c == "*":
         return "STAR"
+    if c == "/":
+        return "SLASH"
     if c == "%":
         return "PERCENT"
     if c == "<":
@@ -54,6 +75,13 @@ def single_char_kind(c: String) -> String:
         return "GT"
     if c == "=":
         return "ASSIGN"
+    return ""
+
+
+def three_char_kind(triple: String) -> String:
+    """Token kind for a three-character token, or "" if there is none."""
+    if triple == "//=":
+        return "SLASHSLASHEQ"
     return ""
 
 
@@ -71,6 +99,16 @@ def two_char_kind(pair: String) -> String:
         return "NE"
     if pair == "//":
         return "SLASHSLASH"
+    if pair == "+=":
+        return "PLUSEQ"
+    if pair == "-=":
+        return "MINUSEQ"
+    if pair == "*=":
+        return "STAREQ"
+    if pair == "%=":
+        return "PERCENTEQ"
+    if pair == "/=":
+        return "SLASHEQ"
     return ""
 
 
@@ -80,21 +118,25 @@ def lex(source: String) raises -> List[Token]:
     Like Python, indentation is significant: the lexer emits NEWLINE at the
     end of every logical line and INDENT / DEDENT when the indentation level
     changes. Blank lines and `#` comments are skipped. Newlines inside
-    parentheses are ignored.
+    parentheses are ignored. Every token records its line and column.
     """
     var tokens = List[Token]()
     var indents = List[Int]()
     indents.append(0)
 
+    # Positions of the '(' characters that are still open.
+    var paren_lines = List[Int]()
+    var paren_columns = List[Int]()
+
     var i = 0
     var line = 1
-    var depth = 0  # parenthesis nesting
+    var line_start = 0  # index of the first character of the current line
     var at_line_start = True
     var n = len(source)
 
     while i < n:
         # ---- Start of a line: measure indentation -------------------------
-        if at_line_start and depth == 0:
+        if at_line_start and len(paren_lines) == 0:
             var col = 0
             while i < n and (source[i] == " " or source[i] == "\t"):
                 if source[i] == "\t":
@@ -112,6 +154,7 @@ def lex(source: String) raises -> List[Token]:
             if first == "\n":
                 i += 1
                 line += 1
+                line_start = i
                 continue
             if first == "\r":
                 i += 1
@@ -124,24 +167,33 @@ def lex(source: String) raises -> List[Token]:
                 continue
 
             # A real line: compare its indentation with the enclosing blocks.
+            var first_column = i - line_start + 1
             var top = indents[len(indents) - 1]
             if col > top:
                 indents.append(col)
-                tokens.append(Token("INDENT", "", line))
+                tokens.append(Token("INDENT", "", line, first_column))
             elif col < top:
                 while col < indents[len(indents) - 1]:
                     _ = indents.pop()
-                    tokens.append(Token("DEDENT", "", line))
+                    tokens.append(Token("DEDENT", "", line, first_column))
                 if col != indents[len(indents) - 1]:
                     raise Error(
-                        "Lexer error: inconsistent indentation on line "
-                        + String(line)
+                        error_at(
+                            "Lexer",
+                            line,
+                            first_column,
+                            (
+                                "inconsistent indentation: this line does not"
+                                " line up with any enclosing block"
+                            ),
+                        )
                     )
 
             at_line_start = False
             continue
 
         var c = source[i]
+        var column = i - line_start + 1
 
         # ---- Whitespace inside a line -------------------------------------
         if c == " " or c == "\t" or c == "\r":
@@ -156,11 +208,12 @@ def lex(source: String) raises -> List[Token]:
 
         # ---- End of line --------------------------------------------------
         if c == "\n":
+            if len(paren_lines) == 0:
+                tokens.append(Token("NEWLINE", "\\n", line, column))
+                at_line_start = True
             i += 1
             line += 1
-            if depth == 0:
-                tokens.append(Token("NEWLINE", "\\n", line - 1))
-                at_line_start = True
+            line_start = i
             continue
 
         # ---- Identifier or keyword ----------------------------------------
@@ -176,54 +229,97 @@ def lex(source: String) raises -> List[Token]:
             var word = source[start:i]
             var kind = keyword_kind(word)
             if kind != "":
-                tokens.append(Token(kind, word, line))
+                tokens.append(Token(kind, word, line, column))
             else:
-                tokens.append(Token("IDENTIFIER", word, line))
+                tokens.append(Token("IDENTIFIER", word, line, column))
             continue
 
-        # ---- Integer literal ----------------------------------------------
+        # ---- Number: 42 or 3.14 -------------------------------------------
         if is_digit(c):
             var start = i
             while i < n:
                 if not is_digit(source[i]):
                     break
                 i += 1
-            tokens.append(Token("INTEGER", source[start:i], line))
+
+            if i + 1 < n and source[i] == "." and is_digit(source[i + 1]):
+                i += 1
+                while i < n:
+                    if not is_digit(source[i]):
+                        break
+                    i += 1
+                tokens.append(Token("FLOAT", source[start:i], line, column))
+            else:
+                tokens.append(Token("INTEGER", source[start:i], line, column))
             continue
 
-        # ---- Two-character operators (checked before one-character ones) --
+        # ---- Longer operators are checked before shorter ones -------------
+        if i + 2 < n:
+            var triple = source[i : i + 3]
+            var triple_kind = three_char_kind(triple)
+            if triple_kind != "":
+                tokens.append(Token(triple_kind, triple, line, column))
+                i += 3
+                continue
+
         if i + 1 < n:
             var pair = source[i : i + 2]
             var pair_kind = two_char_kind(pair)
             if pair_kind != "":
-                tokens.append(Token(pair_kind, pair, line))
+                tokens.append(Token(pair_kind, pair, line, column))
                 i += 2
                 continue
 
         # ---- One-character tokens -----------------------------------------
-        var kind = single_char_kind(c)
-        if kind != "":
+        var single = single_char_kind(c)
+        if single != "":
             if c == "(":
-                depth += 1
-            if c == ")" and depth > 0:
-                depth -= 1
-            tokens.append(Token(kind, c, line))
+                paren_lines.append(line)
+                paren_columns.append(column)
+            if c == ")":
+                if len(paren_lines) == 0:
+                    raise Error(
+                        error_at(
+                            "Lexer",
+                            line,
+                            column,
+                            "this ')' has no matching '('",
+                        )
+                    )
+                _ = paren_lines.pop()
+                _ = paren_columns.pop()
+            tokens.append(Token(single, c, line, column))
             i += 1
             continue
 
-        # ---- Anything we don't understand yet -----------------------------
-        tokens.append(Token("UNKNOWN", c, line))
-        i += 1
+        # ---- Anything else is an error ------------------------------------
+        raise Error(
+            error_at("Lexer", line, column, "unexpected character '" + c + "'")
+        )
+
+    # A '(' that was never closed.
+    if len(paren_lines) > 0:
+        var last = len(paren_lines) - 1
+        raise Error(
+            error_at(
+                "Lexer",
+                paren_lines[last],
+                paren_columns[last],
+                "this '(' is never closed",
+            )
+        )
+
+    var end_column = n - line_start + 1
 
     # The last line may not end with a newline.
     if len(tokens) > 0 and tokens[len(tokens) - 1].kind != "NEWLINE":
-        tokens.append(Token("NEWLINE", "\\n", line))
+        tokens.append(Token("NEWLINE", "\\n", line, end_column))
 
     # Close every block that is still open.
     while len(indents) > 1:
         _ = indents.pop()
-        tokens.append(Token("DEDENT", "", line))
+        tokens.append(Token("DEDENT", "", line, end_column))
 
-    tokens.append(Token("EOF", "", line))
+    tokens.append(Token("EOF", "", line, end_column))
 
     return tokens^

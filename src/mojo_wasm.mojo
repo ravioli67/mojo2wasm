@@ -15,16 +15,16 @@ from .lexer.lexer import lex
 from .lexer.tokens import Token
 from .parser.parser import Parser
 from .parser.ast import Module
-from .sema.checker import check
 from .util.hex import to_hex
 from .util.files import read_file
 from .util.files import write_file
 from .util.dump import format_tokens
 from .util.dump import format_module
+from .util.diagnostics import add_source_context
 
 
 def version() -> String:
-    return "0.3.0"
+    return "0.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -50,25 +50,31 @@ struct FunctionInfo(Copyable, Movable):
 
     var name: String
     var parameters: List[String]  # parameter names, in order
+    var parameter_types: List[String]  # "Int", "Float64" or "Bool"
     var return_type: String
 
     def __init__(
-        out self, name: String, parameters: List[String], return_type: String
+        out self,
+        name: String,
+        parameters: List[String],
+        parameter_types: List[String],
+        return_type: String,
     ):
         self.name = name
         self.parameters = parameters.copy()
+        self.parameter_types = parameter_types.copy()
         self.return_type = return_type
 
     def parameter_count(self) -> Int:
         return len(self.parameters)
 
     def signature(self) -> String:
-        """For example `add(a, b) -> Int`."""
+        """For example `add(a: Int, b: Int) -> Int`."""
         var out = self.name + "("
         for i in range(len(self.parameters)):
             if i > 0:
                 out += ", "
-            out += self.parameters[i]
+            out += self.parameters[i] + ": " + self.parameter_types[i]
         out += ") -> " + self.return_type
         return out^
 
@@ -133,24 +139,32 @@ def compile_file(input_path: String, output_path: String) raises -> Int:
 
 
 def parse(source: String) raises -> Module:
-    """Lexes and parses `source` into a Module (no semantic checks)."""
-    var parser = Parser(lex(source))
-    return parser.parse()
+    """Lexes and parses `source` into a Module (no semantic checks, so the
+    expressions have no types yet)."""
+    try:
+        var parser = Parser(lex(source))
+        return parser.parse()
+    except e:
+        raise Error(add_source_context(source, String(e)))
 
 
 def tokenize(source: String) raises -> List[Token]:
     """Returns the tokens of `source`, including NEWLINE/INDENT/DEDENT/EOF."""
-    return lex(source)
+    try:
+        return lex(source)
+    except e:
+        raise Error(add_source_context(source, String(e)))
 
 
 def validate(source: String) -> String:
     """Runs every stage except code generation.
 
-    Returns "" if the program is valid, otherwise the error message.
+    Returns "" if the program is valid, otherwise the error message (with
+    the offending source line and carets, ready to print).
     """
     try:
-        var module = parse(source)
-        check(module)
+        var compiler = Compiler()
+        _ = compiler.analyze(source, False)
         return ""
     except e:
         return String(e)
@@ -166,16 +180,20 @@ def list_functions(source: String) raises -> List[FunctionInfo]:
     Useful for tools that load the compiled module and need to know which
     exports exist and how many arguments each takes.
     """
-    var module = parse(source)
-    check(module)
+    var compiler = Compiler()
+    var module = compiler.analyze(source, False)
 
     var infos = List[FunctionInfo]()
     for i in range(len(module.functions)):
         var function = module.functions[i].copy()
         var names = List[String]()
+        var types = List[String]()
         for p in range(len(function.parameters)):
             names.append(function.parameters[p].name)
-        infos.append(FunctionInfo(function.name, names, function.return_type))
+            types.append(function.parameters[p].type_name)
+        infos.append(
+            FunctionInfo(function.name, names, types, function.return_type)
+        )
 
     return infos^
 

@@ -55,18 +55,27 @@ def fib_iter(n: Int) -> Int:
 
 | Feature | Notes |
 |---------|-------|
-| Types | `Int` only (64-bit, signed). Maps to WASM `i64`. |
+| Types | `Int` (64-bit signed, WASM `i64`), `Float64` (WASM `f64`) and `Bool` (WASM `i32`). Use them for parameters, return values and variables. |
+| Literals | `42`, `3.14` (up to 15 significant digits), `True`, `False` |
+| Conversions | Always explicit: `Float64(n)`, `Int(x)` (truncates toward zero; traps on NaN / overflow), `Int(b)`, `Bool(n)` (`n != 0`) |
 | Functions | Any number per file, any order. Calls (including recursion and forward calls) are supported. |
-| Statements | `return`, `if` / `elif` / `else`, `while`, `break`, `continue`, `var x = e` (optionally `var x: Int = e`), `x = e`, and `x += e` (also `-=`, `*=`, `//=`, `%=`) |
-| Operators | `+ - * // %` (arithmetic), `< <= > >= == !=` (comparison), `and` `or` `not` (logic), unary `-`, parentheses |
+| Statements | `return`, `if` / `elif` / `else`, `while`, `break`, `continue`, `var x = e` (optionally `var x: Int = e`), `x = e`, and `x += e` (also `-=`, `*=`, `/=`, `//=`, `%=`) |
+| Operators | `+ - * // %` and `/` (arithmetic), `< <= > >= == !=` (comparison), `and` `or` `not` (logic), unary `-`, parentheses |
 | Comments | `#` to end of line |
 | Blocks | Indentation-based, like Python (a tab counts as 4 spaces) |
 
 Rules enforced by the checker:
 
-- A comparison produces a Bool, and `and` / `or` / `not` combine Bools.
-  Bools may only be used as the condition of `if` / `while` (there are no
-  Bool variables or parameters yet), so `if a:` and `a + (b < c)` are errors.
+- There is no implicit conversion. `+ - *` need two `Int`s or two `Float64`s
+  (`x * 2` with `x: Float64` is an error: write `x * 2.0`). `/` needs two
+  `Float64`s (use `//` for integers), `//` and `%` need two `Int`s.
+  Comparisons need matching types (`==` and `!=` also accept two `Bool`s).
+- A comparison produces a `Bool`, and `and` / `or` / `not` combine `Bool`s.
+  `Bool`s can be stored in variables, passed to functions and returned; an
+  `if` / `while` condition must be a `Bool` (so `if n:` is an error).
+- A `var` takes the type of its value (`var x = 1.5` is a `Float64`), or its
+  annotation, which must agree. Assigning a different type is an error.
+- A `return` value must have the function's declared return type.
 - `and` / `or` short-circuit: the right side is only evaluated when needed,
   so `n > 0 and 10 // n >= 2` is safe when `n` is 0.
 - `break` and `continue` are only allowed inside a `while` body.
@@ -86,7 +95,7 @@ Rules enforced by the checker:
 | `main.mojo` | Command-line entry: `mojo -I . main.mojo build in.mojo out.wasm` (also `hex`, `check`, `functions`, `tokens`, `ast`) |
 | `src/mojo_wasm.mojo` | Public API (documented in `docs/api.md`) |
 | `src/compiler.mojo` | Runs the pipeline |
-| `src/lexer/tokens.mojo` | `Token(kind, lexeme, line)` |
+| `src/lexer/tokens.mojo` | `Token(kind, lexeme, line, column)` |
 | `src/lexer/lexer.mojo` | `lex(source) -> List[Token]` |
 | `src/parser/ast.mojo` | `Expr`, `Stmt`, `Function`, `Module` and builder helpers |
 | `src/parser/parser.mojo` | Recursive-descent `Parser` |
@@ -97,10 +106,11 @@ Rules enforced by the checker:
 | `src/wasm/wat.mojo` | `Module` to WAT text |
 | `src/util/hex.mojo` | `to_hex`, `from_hex` |
 | `src/util/files.mojo` | `read_file`, `write_file` |
+| `src/util/diagnostics.mojo` | Error messages with source excerpts, "did you mean" suggestions |
 | `src/util/dump.mojo` | `format_tokens`, `format_module` (used by `dump_tokens` / `dump_ast`) |
 | `src/ir/` | Reserved for a future IR |
 | `examples/` | Sample programs |
-| `tests/` | Expected output (`tests/wasm/*.hex`) and Node helper scripts |
+| `tests/` | Expected output (`tests/wasm/*.hex` / `*.wat`, `tests/errors/*`) and Node scripts |
 
 Each folder under `src/` contains an empty `__init__.mojo` so Mojo treats it
 as a package (required for the relative imports).
@@ -109,9 +119,13 @@ as a package (required for the relative imports).
 
 ### Lexer
 Reads characters left to right. Identifiers are read in full and then looked
-up in a keyword table (`def return if elif else while var Int`), so `default`
-is an identifier. Two-character operators (`-> <= >= == != //`) are matched
-before single-character ones.
+up in a keyword table (`def return if elif else while var and or not break
+continue True False Int Float64 Bool`), so `default` is an identifier.
+Longer operators (`//=`, then `-> <= >= == != // += -= *= /= %=`) are matched
+before single-character ones. A number followed by `.` and a digit is a
+`FLOAT`, otherwise an `INTEGER`. Every token records its line and column.
+The lexer raises an error for characters it does not understand and tracks
+parentheses, so it can point at a `(` that is never closed or a stray `)`.
 
 Indentation works like Python: a stack of indentation widths starts at `[0]`.
 At the start of every non-blank line, a deeper indent emits `INDENT`, a
@@ -119,16 +133,26 @@ shallower one emits one `DEDENT` per level closed (an indent that matches no
 open level is an error). Each logical line ends with `NEWLINE`. Newlines
 inside parentheses are ignored. At end of file all open blocks are closed.
 
-Token kinds are strings: `DEF RETURN IF ELIF ELSE WHILE VAR INT IDENTIFIER
-INTEGER LPAREN RPAREN COLON COMMA ARROW ASSIGN PLUS MINUS STAR SLASHSLASH
-PERCENT LT LE GT GE EQ NE NEWLINE INDENT DEDENT UNKNOWN EOF`.
+Token kinds are strings: `DEF RETURN IF ELIF ELSE WHILE VAR BREAK CONTINUE
+AND OR NOT TRUE FALSE INT FLOAT64 BOOL IDENTIFIER INTEGER FLOAT LPAREN
+RPAREN COLON COMMA ARROW ASSIGN PLUS MINUS STAR SLASH SLASHSLASH PERCENT
+PLUSEQ MINUSEQ STAREQ SLASHEQ SLASHSLASHEQ PERCENTEQ LT LE GT GE EQ NE
+NEWLINE INDENT DEDENT EOF`.
 
 ### Parser
 Recursive descent; the grammar is documented in the docstring of `Parser`.
 Operator precedence, loosest to tightest: comparison, `+ -`, `* // %`,
-unary `-`, then calls / parentheses / literals / variables. Comparisons do
-not chain (`a < b < c` is a syntax error). `-x` is parsed as `0 - x`, and
-`elif` is parsed as an `if` nested inside the `else` branch.
+unary `-`, then calls / conversions / parentheses / literals / variables
+(`or` and `and` / `not` bind looser than comparisons). Comparisons do not
+chain (`a < b < c` is an error that suggests `and`), and `elif` is parsed as
+an `if` nested inside the `else` branch. A type name followed by `(` is a
+conversion (`Float64(n)`).
+
+Error messages name tokens in plain words ("expected ':' but found the end
+of the line") and special-case common slips: `if x = 5:` suggests `==`, and a
+block that is not indented says so. Float literals are converted exactly: all
+digits are read as one integer and divided by a power of ten, which is
+correctly rounded for up to 15 significant digits.
 
 ### AST: an arena with indices
 Mojo structs cannot contain themselves, so the tree is stored flat in
@@ -142,23 +166,46 @@ Module
  └─ exprs     : List[Expr]         Expr.left / right / args -> indices into exprs
 ```
 
-`Expr.kind` is `INT`, `VAR`, `BINARY` or `CALL`. `Stmt.kind` is `RETURN`,
-`IF`, `WHILE`, `VAR` or `ASSIGN`. Builder helpers (`int_expr`, `binary_expr`,
+`Expr.kind` is `INT`, `FLOAT`, `BOOL`, `VAR`, `NEG`, `NOT`, `BINARY`, `LOGIC`,
+`CALL` or `CAST`. `Stmt.kind` is `RETURN`, `IF`, `WHILE`, `VAR`, `ASSIGN`,
+`BREAK` or `CONTINUE`. Builder helpers (`int_expr`, `binary_expr`,
 `if_stmt`, ...) fill in the unused fields.
+
+Every node stores the `line` and `column` it came from (a binary expression
+points at its operator, a call at the function name). The checker fills in
+`Expr.etype` (`"Int"`, `"Float64"` or `"Bool"`) for every expression and the
+type of every `var`, because the emitter chooses instructions from them.
 
 ### Semantic checker
 Walks every function with a growing list of names in scope (parameters first).
-It computes a type (`Int` or `Bool`) for each expression and verifies:
-declared names, function names and argument counts, operand types, condition
-types, duplicate declarations, `break` / `continue` placement, and that all
-paths return.
+It computes a type (`Int`, `Float64` or `Bool`) for each expression, stores it
+on the node, and verifies: declared names, function names, argument counts and
+types, operand types, condition types, return types, conversions,
+duplicate declarations, `break` / `continue` placement, reserved names
+(anything starting with `__`) and that all paths return. When a name is
+unknown it suggests a close match from the names in scope.
+
+### Error messages
+Each stage raises `<Kind> error at <line>:<column>: <text>`. The compiler
+catches that and expands it, using the source text, to:
+
+```
+Semantic error: unknown variable 'cout'. Did you mean 'count'?
+  --> line 2, column 20
+  |
+2 |     return price * cout
+  |                    ^^^^
+```
+
+The carets cover the word, number or operator at the reported column. All
+the messages are covered by `tests/errors/`.
 
 ### Optimizer
 `opt/fold.mojo` makes one pass over the expression arena. Because the parser
 creates a node's children before the node, a forward pass folds bottom-up:
-`2 + 3 * 4` becomes `14` and `-5` (parsed as `0 - 5`) becomes `-5`. Only
+`2 + 3 * 4` becomes `14` and `-5` (negating the literal 5) becomes `-5`. Only
 `+ - * // %` on two integer literals is folded, using the same floor
-semantics as the runtime. A division by zero is left alone so the program
+semantics as the runtime. `Float64` arithmetic is not folded. A division by zero is left alone so the program
 traps when run instead of failing to compile. Use `compile_unoptimized` to
 skip this pass.
 
@@ -169,7 +216,7 @@ its source name. Sections, in order:
 | Section | Id | Content |
 |---------|----|---------|
 | header | | `00 61 73 6D` + version `01 00 00 00` |
-| type | 1 | one signature `(i64 × n) -> i64` per function |
+| type | 1 | one signature per function, built from its parameter and return types |
 | function | 3 | function `i` uses type `i` |
 | export | 7 | every source function, by name |
 | code | 10 | one body per function |
@@ -201,6 +248,19 @@ continue        br <depth of the loop's loop>
 leaves the `block` and `br 0` jumps to the `loop` top. Every `if` entered
 adds one level, so the emitter tracks the two depths and increases them by
 one for each nested `if`.
+
+Type mapping: `Int` is `i64`, `Float64` is `f64`, `Bool` is `i32` (0 or 1).
+Local variables are declared up front in groups of consecutive locals with the
+same type. Instructions are chosen from the operand types, e.g. `+` becomes
+`i64.add` or `f64.add`, and `==` on two Bools becomes `i32.eq`. Conversions
+use `f64.convert_i64_s`, `i64.trunc_f64_s`, `i64.extend_i32_u` and
+`i64.eqz` + `i32.eqz`. Negation is `0 - x` for `Int` and `f64.neg` for
+`Float64`.
+
+A `Float64` literal becomes `f64.const` followed by its 8 IEEE-754 bytes. They
+are computed with plain arithmetic (halving or doubling until the value is
+in [1, 2) is exact in binary floating point), so no bit-casting is needed;
+this was checked against Python's `struct.pack` on 40,000 values.
 
 ### Floor division
 Mojo's `//` and `%` round toward negative infinity, but WASM's `i64.div_s` /
@@ -271,14 +331,22 @@ node tests/run_wasm.js fib.wasm fib 20                  # prints 6765
 node tests/run_wasm.js fib.wasm fib_iter 50             # prints 12586269025
 ```
 
-Behaviour tests (460 checks: fib, gcd, primes, collatz, floor division with
-negative numbers, short-circuiting, `break` / `continue`, constant folding):
+Behaviour tests (523 checks: fib, gcd, primes, collatz, floor division with
+negative numbers, short-circuiting, `break` / `continue`, constant folding,
+`Float64` arithmetic and conversions, `Bool` parameters and results):
 
 ```
 mojo -I . main.mojo build examples/fibonacci.mojo build/fibonacci.wasm
 mojo -I . main.mojo build examples/features.mojo  build/features.wasm
 mojo -I . main.mojo build examples/logic.mojo     build/logic.wasm
+mojo -I . main.mojo build examples/types.mojo     build/types.wasm
 node tests/behavior.js build
+```
+
+Error messages are checked against the expected text in `tests/errors/`:
+
+```
+node tests/check_errors.js
 ```
 
 WAT output can be compared with `tests/wasm/*.wat`:
@@ -290,7 +358,7 @@ mojo -I . main.mojo wat examples/fibonacci.mojo
 The `.hex` and `.wat` files were produced by a reference implementation of exactly this
 design and validated in a real WebAssembly engine, so a mismatch points at a
 bug in the Mojo code (or a Mojo-version syntax difference), not in the design.
-`examples/features.mojo` exercises `while`, `elif`/`else`, unary minus,
+`examples/types.mojo` covers `Float64` and `Bool`. `examples/features.mojo` exercises `while`, `elif`/`else`, unary minus,
 precedence, `%`, `//`, `*` and forward calls; `examples/logic.mojo` covers
 `and` / `or` / `not`, compound assignment, `break` / `continue`, floor
 division and constant folding.
@@ -300,10 +368,11 @@ division and constant folding.
 1. Run all examples (including `examples/library_usage.mojo`) through the Mojo implementation and fix any
    Mojo-version syntax differences.
 2. Unit tests per stage under `tests/lexer`, `tests/parser`, `tests/wasm`.
-3. A real `Bool` type (variables, parameters, return values).
-4. Block-scoped variables with shadowing rules.
-5. More types (`Float64`, `Int32`, `Bool`) and implicit type promotion rules.
+3. More types (`Int32`, strings), block-scoped variables, and `Float64`
+   arithmetic folding.
+4. Warnings (unused variables, unreachable code).
+5. Implicit `Int` to `Float64` promotion for literals.
 6. An IR in `src/ir/` between the checker and the emitter, enabling more
    optimizations (dead code removal, strength reduction) and richer lowering.
 7. Replace string token / node kinds with a compact enum-like representation.
-8. Source-level diagnostics: show the offending line with a caret.
+8. Report several errors per run instead of stopping at the first.

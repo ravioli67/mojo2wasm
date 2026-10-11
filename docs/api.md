@@ -13,11 +13,19 @@ from src.mojo_wasm import compile, try_compile, validate
 
 Functions marked **raises** raise an `Error` when the program is invalid. The
 message starts with one of `Lexer error`, `Parser error`, `Semantic error` or
-`Emitter error`, and includes the line number when known:
+`Emitter error`, and shows the offending source line with carets under the
+problem (and, for unknown names, a "did you mean" suggestion):
 
 ```
-Semantic error on line 2: unknown variable 'z'
+Semantic error: unknown variable 'cout'. Did you mean 'count'?
+  --> line 2, column 20
+  |
+2 |     return price * cout
+  |                    ^^^^
 ```
+
+The same text is in `CompileResult.error` and is returned by `validate`,
+ready to print.
 
 If you prefer values to exceptions, use `try_compile` or `validate`.
 
@@ -65,9 +73,10 @@ else:
 |--------|------|---------|
 | `name` | `String` | Function name (also its WASM export name) |
 | `parameters` | `List[String]` | Parameter names, in order |
-| `return_type` | `String` | Always `Int` for now |
+| `parameter_types` | `List[String]` | `"Int"`, `"Float64"` or `"Bool"` for each parameter |
+| `return_type` | `String` | `"Int"`, `"Float64"` or `"Bool"` |
 | `parameter_count()` | `Int` | Number of parameters |
-| `signature()` | `String` | e.g. `add(a, b) -> Int` |
+| `signature()` | `String` | e.g. `add(a: Int, b: Int) -> Int` |
 
 ## Debug output
 
@@ -140,8 +149,13 @@ def fib_iter(n: Int) -> Int
 )
 ```
 
-`Int` is a 64-bit integer, so JavaScript sees these functions with `BigInt`
-arguments and results (`add(2n, 3n)`).
+## Types and JavaScript
+
+| Mojo type | WASM type | In JavaScript |
+|-----------|-----------|---------------|
+| `Int` | `i64` | `BigInt` (`add(2n, 3n)`) |
+| `Float64` | `f64` | `number` |
+| `Bool` | `i32` | `0` or `1` |
 
 ## Utilities
 

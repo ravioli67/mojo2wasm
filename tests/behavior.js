@@ -3,9 +3,10 @@
 //   mojo -I . main.mojo build examples/fibonacci.mojo build/fibonacci.wasm
 //   mojo -I . main.mojo build examples/features.mojo  build/features.wasm
 //   mojo -I . main.mojo build examples/logic.mojo     build/logic.wasm
+//   mojo -I . main.mojo build examples/types.mojo     build/types.wasm
 //   node tests/behavior.js build
 //
-// Mojo `Int` is 64-bit, so everything is a BigInt here.
+// From JavaScript: Int is a BigInt, Float64 is a number, Bool is 0 or 1.
 const fs = require("fs");
 const dir = process.argv[2] || "build";
 
@@ -21,7 +22,11 @@ const eq = (name, got, want) => {
   if (got !== want) { fails++; console.log(`FAIL ${name}: got ${got}, want ${want}`); }
 };
 
-const Fi = load("fibonacci"), F = load("features"), L = load("logic");
+const Fi = load("fibonacci"), F = load("features"), L = load("logic"), T = load("types");
+const near = (name, got, want) => {
+  checks++;
+  if (Math.abs(got - want) > 1e-9 * Math.max(1, Math.abs(want))) { fails++; console.log(`FAIL ${name}: got ${got}, want ${want}`); }
+};
 
 // fibonacci
 const fibs = [0n, 1n, 1n, 2n, 3n, 5n, 8n, 13n, 21n, 34n, 55n, 89n, 144n];
@@ -70,6 +75,33 @@ eq("safe_ratio(6)", L.safe_ratio(6n), 0n);
 
 // constant folding gives the same answer as the runtime would
 eq("folded()", L.folded(), 16n);
+
+// ---- Float64 ----
+near("circle_area", T.circle_area(2), 3.14159 * 4);
+eq("average", T.average(3, 4), 3.5);
+eq("c2f(100)", T.celsius_to_fahrenheit(100), 212); eq("c2f(0)", T.celsius_to_fahrenheit(0), 32); eq("c2f(-40)", T.celsius_to_fahrenheit(-40), -40);
+eq("to_float", T.to_float(7n), 7); eq("to_float(-3)", T.to_float(-3n), -3);
+eq("truncate(3.99)", T.truncate(3.99), 3n); eq("truncate(-3.99)", T.truncate(-3.99), -3n);
+eq("negate", T.negate(2.5), -2.5); eq("negate(-1.25)", T.negate(-1.25), 1.25);
+for (const x of [2, 9, 100, 0.25, 1e6, 123.456]) near(`sqrt_newton(${x})`, T.sqrt_newton(x), Math.sqrt(x));
+eq("sqrt_newton(0)", T.sqrt_newton(0), 0); eq("sqrt_newton(-4)", T.sqrt_newton(-4), 0);
+eq("mean_of_first(10)", T.mean_of_first(10n), 5.5);
+eq("clamp01(-5)", T.clamp01(-5), 0); eq("clamp01(9)", T.clamp01(9), 1); eq("clamp01(0.25)", T.clamp01(0.25), 0.25);
+
+// ---- Bool (0 or 1 from JavaScript) ----
+for (let n = -3; n <= 4; n++) eq(`is_even(${n})`, T.is_even(BigInt(n)), n % 2 === 0 ? 1 : 0);
+eq("is_positive(1.5)", T.is_positive(1.5), 1); eq("is_positive(0)", T.is_positive(0), 0); eq("is_positive(-1)", T.is_positive(-1), 0);
+eq("truth()", T.truth(), 1); eq("invert(0)", T.invert(0), 1); eq("invert(1)", T.invert(1), 0);
+for (const a of [0, 1]) for (const c of [0, 1]) {
+  eq(`both(${a},${c})`, T.both(a, c), a && c ? 1 : 0);
+  eq(`either(${a},${c})`, T.either(a, c), a || c ? 1 : 0);
+  eq(`exactly_one(${a},${c})`, T.exactly_one(a, c), a ^ c);
+  eq(`same(${a},${c})`, T.same(a, c), a === c ? 1 : 0);
+}
+eq("bool_to_int(1)", T.bool_to_int(1), 1n); eq("bool_to_int(0)", T.bool_to_int(0), 0n);
+eq("int_to_bool(5)", T.int_to_bool(5n), 1); eq("int_to_bool(0)", T.int_to_bool(0n), 0); eq("int_to_bool(-3)", T.int_to_bool(-3n), 1);
+eq("in_unit_range(0.5)", T.in_unit_range(0.5), 1); eq("in_unit_range(1.5)", T.in_unit_range(1.5), 0); eq("in_unit_range(-0.1)", T.in_unit_range(-0.1), 0);
+eq("count_primes_below(30)", T.count_primes_below(30n), 10n); eq("count_primes_below(100)", T.count_primes_below(100n), 25n);
 
 console.log(fails === 0 ? `ALL ${checks} CHECKS PASSED` : `${fails} of ${checks} CHECKS FAILED`);
 process.exit(fails === 0 ? 0 : 1);
