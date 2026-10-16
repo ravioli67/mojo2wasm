@@ -58,8 +58,13 @@ def fib_iter(n: Int) -> Int:
 | Types | `Int` (64-bit signed, WASM `i64`), `Float64` (WASM `f64`) and `Bool` (WASM `i32`). Use them for parameters, return values and variables. |
 | Literals | `42`, `3.14` (up to 15 significant digits), `True`, `False` |
 | Conversions | Always explicit: `Float64(n)`, `Int(x)` (truncates toward zero; traps on NaN / overflow), `Int(b)`, `Bool(n)` (`n != 0`) |
-| Functions | Any number per file, any order. Calls (including recursion and forward calls) are supported. |
-| Statements | `return`, `if` / `elif` / `else`, `while`, `break`, `continue`, `var x = e` (optionally `var x: Int = e`), `x = e`, and `x += e` (also `-=`, `*=`, `/=`, `//=`, `%=`) |
+| Functions | `def` or `fn`, any number per file, in any order. Recursion and forward calls work. `raises` is accepted (and ignored). A function with no `-> type` (or `-> None`) returns nothing, and a call to it is a statement. |
+| Constants | Top-level `alias N = 10` (or `comptime`), optionally typed (`alias PI: Float64 = 3.14`). Values may use literals and earlier aliases. |
+| Statements | `return` (bare in functions with no return type), `if` / `elif` / `else`, `while`, `for i in range(...)`, `break`, `continue`, `pass`, `var x = e` (optionally `var x: Int = e`), `x = e`, `x += e` (also `-=`, `*=`, `/=`, `//=`, `%=`), `print(...)`, and calls on their own line |
+| Loops | `for i in range(stop)`, `range(start, stop)`, `range(start, stop, step)`; `step` must be an integer literal such as `2` or `-1` |
+| Conditional expression | `a if condition else b` (only the chosen side is evaluated) |
+| Output | `print(a, b, ...)` prints its arguments separated by spaces, then a newline. Arguments are `Int`, `Float64`, `Bool` values or string literals. The host must supply the printing functions (see `docs/api.md`). |
+| Strings | Only as arguments to `print()` (and as docstrings, which are ignored). Escapes `\n \t \r \\ \" \' \0`; `"""triple quotes"""` may span lines. |
 | Operators | `+ - * // %` and `/` (arithmetic), `< <= > >= == !=` (comparison), `and` `or` `not` (logic), unary `-`, parentheses |
 | Comments | `#` to end of line |
 | Blocks | Indentation-based, like Python (a tab counts as 4 spaces) |
@@ -78,11 +83,21 @@ Rules enforced by the checker:
 - A `return` value must have the function's declared return type.
 - `and` / `or` short-circuit: the right side is only evaluated when needed,
   so `n > 0 and 10 // n >= 2` is safe when `n` is 0.
-- `break` and `continue` are only allowed inside a `while` body.
-- Variables are function-wide: once declared with `var`, a name is visible to
-  the rest of the function, including after the block it was declared in.
-  Declaring the same name twice is an error.
-- Every function must return on every path.
+- `break` and `continue` are only allowed inside a loop. In a `for` loop,
+  `continue` still advances the counter.
+- Variables are block-scoped like in Mojo: a variable disappears at the end
+  of the `if`, `while` or `for` block that declared it, a loop variable only
+  lives inside its loop (so two loops can both use `i`), and an inner block
+  may shadow an outer variable. Declaring a name twice in the same block is an
+  error, as is reusing the name of an alias.
+- Assigning to a `for` loop variable does not change the iteration (the loop
+  keeps its own counter, as in Mojo).
+- A function with a return type must return on every path. A function without
+  one may end without `return`, and a bare `return` leaves it early.
+- A call to a function with no return type cannot be used as a value
+  (`x = log(1)`, `print(log(1))`).
+- Aliases cannot be assigned to, and may only use literals and earlier aliases.
+- `print` is a reserved function name, as are names starting with `__`.
 - `//` and `%` use floor semantics like Mojo and Python: `-7 // 2` is `-4`
   and `-7 % 3` is `2`. Division by zero traps at runtime. (WASM's own
   `i64.div_s` / `i64.rem_s` truncate toward zero, so programs that use these
@@ -120,7 +135,8 @@ as a package (required for the relative imports).
 ### Lexer
 Reads characters left to right. Identifiers are read in full and then looked
 up in a keyword table (`def return if elif else while var and or not break
-continue True False Int Float64 Bool`), so `default` is an identifier.
+continue pass for in raises alias comptime fn None True False Int Float64
+Bool`), so `default` is an identifier.
 Longer operators (`//=`, then `-> <= >= == != // += -= *= /= %=`) are matched
 before single-character ones. A number followed by `.` and a digit is a
 `FLOAT`, otherwise an `INTEGER`. Every token records its line and column.
@@ -148,6 +164,14 @@ chain (`a < b < c` is an error that suggests `and`), and `elif` is parsed as
 an `if` nested inside the `else` branch. A type name followed by `(` is a
 conversion (`Float64(n)`).
 
+`fn` is the same as `def`, `alias` / `comptime` declare constants, and a
+function's `-> type` is optional. Statements that start with a name are an
+assignment, a compound assignment, `print(...)` or a call; anything else that
+looks like an expression gets "this is not a statement". `for` loops are only
+accepted over `range(...)` and the step must be a literal, so the direction
+of the loop is known at compile time. `a if c else b` is parsed after the
+`or` level, so `x = 1 if a or b else 2` works.
+
 Error messages name tokens in plain words ("expected ':' but found the end
 of the line") and special-case common slips: `if x = 5:` suggests `==`, and a
 block that is not indented says so. Float literals are converted exactly: all
@@ -166,18 +190,26 @@ Module
  └─ exprs     : List[Expr]         Expr.left / right / args -> indices into exprs
 ```
 
-`Expr.kind` is `INT`, `FLOAT`, `BOOL`, `VAR`, `NEG`, `NOT`, `BINARY`, `LOGIC`,
-`CALL` or `CAST`. `Stmt.kind` is `RETURN`, `IF`, `WHILE`, `VAR`, `ASSIGN`,
-`BREAK` or `CONTINUE`. Builder helpers (`int_expr`, `binary_expr`,
+`Expr.kind` is `INT`, `FLOAT`, `BOOL`, `STRING`, `VAR`, `ALIAS`, `NEG`, `NOT`,
+`BINARY`, `LOGIC`, `TERNARY`, `CALL` or `CAST`. `Stmt.kind` is `RETURN`, `IF`,
+`WHILE`, `FOR`, `VAR`, `ASSIGN`, `PRINT`, `EXPR`, `PASS`, `BREAK` or
+`CONTINUE`. `Module` also holds the `aliases`. Builder helpers (`int_expr`, `binary_expr`,
 `if_stmt`, ...) fill in the unused fields.
 
 Every node stores the `line` and `column` it came from (a binary expression
 points at its operator, a call at the function name). The checker fills in
 `Expr.etype` (`"Int"`, `"Float64"` or `"Bool"`) for every expression and the
-type of every `var`, because the emitter chooses instructions from them.
+type of every `var`, because the emitter chooses instructions from them. The
+checker also resolves every variable to a *local slot* (parameters first, then
+one new slot per declaration, even when a name is reused in another block) and
+records the slots in `Function.slot_names` / `slot_types`, so the emitter never
+has to deal with names or scopes. A `for` loop uses three consecutive slots:
+the loop variable and two hidden ones (its counter and its end value).
 
 ### Semantic checker
-Walks every function with a growing list of names in scope (parameters first).
+Checks the aliases first, then walks every function with a `Scope` (a stack of
+the variables currently visible, parameters first; leaving a block removes the
+variables it declared).
 It computes a type (`Int`, `Float64` or `Bool`) for each expression, stores it
 on the node, and verifies: declared names, function names, argument counts and
 types, operand types, condition types, return types, conversions,
@@ -216,10 +248,17 @@ its source name. Sections, in order:
 | Section | Id | Content |
 |---------|----|---------|
 | header | | `00 61 73 6D` + version `01 00 00 00` |
-| type | 1 | one signature per function, built from its parameter and return types |
-| function | 3 | function `i` uses type `i` |
-| export | 7 | every source function, by name |
+| type | 1 | one signature per function (and per import), built from the parameter and return types |
+| import | 2 | only when the program prints: the `print_*` functions from module `env` |
+| function | 3 | defined function `i` uses type `imports + i` |
+| memory | 5 | only when the program prints: one 64 KiB page |
+| export | 7 | every source function by name, plus `memory` |
 | code | 10 | one body per function |
+| data | 11 | only when the program prints: the string literals, at address 0 |
+
+WASM numbers imported functions first, so the function index of source
+function `f` is `imports + f`, and the `//` / `%` helpers come after the
+source functions.
 
 If the program uses `//` and/or `%`, one or two helper functions follow the
 user's functions (not exported); see "Floor division" below.
@@ -261,6 +300,45 @@ A `Float64` literal becomes `f64.const` followed by its 8 IEEE-754 bytes. They
 are computed with plain arithmetic (halving or doubling until the value is
 in [1, 2) is exact in binary floating point), so no bit-casting is needed;
 this was checked against Python's `struct.pack` on 40,000 values.
+
+### print, strings and imports
+`print(a, "x", b)` becomes, for each argument, a call of an imported host
+function, with a call to `print_str(" ")` between arguments and
+`print_str("\n")` at the end:
+
+```
+print_i64(Int)   print_f64(Float64)   print_bool(0 | 1)   print_str(address, length)
+```
+
+Only the imports a program uses are declared. String literals are collected
+into one table (each distinct text once, plus `" "` and `"\n"` when needed)
+that becomes the data segment at address 0; `print_str` receives an address
+and a length, and the host reads the text from the exported `memory`.
+Strings are UTF-8. See `docs/api.md` for how to write a host, and
+`tests/host.js` for a working one.
+
+### Loops, scopes and void functions
+`for i in range(a, b, step)` is lowered with a hidden counter, so the loop
+variable behaves as in Mojo even if the body assigns to it:
+
+```
+counter = a ; end = b
+block                                  ;; break leaves this
+  loop
+    br_if exit  unless  counter < end   (counter > end when step < 0)
+    i = counter
+    block  body  end                   ;; continue leaves this
+    counter += step
+    br 0
+  end
+end
+```
+
+Functions with no return type have no WASM result, a bare `return` is a plain
+`return`, and a call used as a statement is followed by `drop` when the callee
+returns a value. `a if c else b` becomes `c ; if (result T) a else b end`.
+Aliases are inlined: a use of an alias emits the alias's expression (the
+optimizer replaces uses of literal aliases with the literal itself).
 
 ### Floor division
 Mojo's `//` and `%` round toward negative infinity, but WASM's `i64.div_s` /
@@ -331,15 +409,26 @@ node tests/run_wasm.js fib.wasm fib 20                  # prints 6765
 node tests/run_wasm.js fib.wasm fib_iter 50             # prints 12586269025
 ```
 
-Behaviour tests (523 checks: fib, gcd, primes, collatz, floor division with
+Programs that print can be run with `tests/run_wasm.js`, which supplies the
+printing functions:
+
+```
+mojo -I . main.mojo build examples/hello.mojo hello.wasm
+node tests/run_wasm.js hello.wasm main
+```
+
+Behaviour tests (548 checks: fib, gcd, primes, collatz, floor division with
 negative numbers, short-circuiting, `break` / `continue`, constant folding,
-`Float64` arithmetic and conversions, `Bool` parameters and results):
+`Float64` arithmetic and conversions, `Bool` parameters and results,
+`print` output, `for` loops, aliases, conditional expressions, block scoping):
 
 ```
 mojo -I . main.mojo build examples/fibonacci.mojo build/fibonacci.wasm
 mojo -I . main.mojo build examples/features.mojo  build/features.wasm
 mojo -I . main.mojo build examples/logic.mojo     build/logic.wasm
 mojo -I . main.mojo build examples/types.mojo     build/types.wasm
+mojo -I . main.mojo build examples/hello.mojo     build/hello.wasm
+mojo -I . main.mojo build examples/language.mojo  build/language.wasm
 node tests/behavior.js build
 ```
 
@@ -358,6 +447,8 @@ mojo -I . main.mojo wat examples/fibonacci.mojo
 The `.hex` and `.wat` files were produced by a reference implementation of exactly this
 design and validated in a real WebAssembly engine, so a mismatch points at a
 bug in the Mojo code (or a Mojo-version syntax difference), not in the design.
+`examples/hello.mojo` and `examples/language.mojo` cover `fn`, `print`, `for`,
+`alias`, `a if c else b`, scoping and functions without a return type.
 `examples/types.mojo` covers `Float64` and `Bool`. `examples/features.mojo` exercises `while`, `elif`/`else`, unary minus,
 precedence, `%`, `//`, `*` and forward calls; `examples/logic.mojo` covers
 `and` / `or` / `not`, compound assignment, `break` / `continue`, floor
@@ -365,14 +456,18 @@ division and constant folding.
 
 ## Roadmap
 
-1. Run all examples (including `examples/library_usage.mojo`) through the Mojo implementation and fix any
-   Mojo-version syntax differences.
+1. Run every example (including `examples/library_usage.mojo`) through the
+   Mojo implementation and fix any Mojo-version syntax differences.
 2. Unit tests per stage under `tests/lexer`, `tests/parser`, `tests/wasm`.
-3. More types (`Int32`, strings), block-scoped variables, and `Float64`
+3. A `String` type (variables, parameters, concatenation, `len`), built on
+   the linear memory that `print` already uses.
+4. `struct`s with fields and methods (needs memory layout and pointers),
+   then `List[Int]`.
+5. `for x in collection`, `while ... else`, default and keyword arguments.
+6. More numeric types (`Int32`, `UInt8`, `Float32`) and `Float64`
    arithmetic folding.
-4. Warnings (unused variables, unreachable code).
-5. Implicit `Int` to `Float64` promotion for literals.
-6. An IR in `src/ir/` between the checker and the emitter, enabling more
-   optimizations (dead code removal, strength reduction) and richer lowering.
-7. Replace string token / node kinds with a compact enum-like representation.
-8. Report several errors per run instead of stopping at the first.
+7. Imports between files and a standard library of `math` functions.
+8. An IR in `src/ir/` between the checker and the emitter, enabling more
+   optimizations (dead code removal, strength reduction).
+9. Report several errors per run instead of stopping at the first, and add
+   warnings (unused variables, unreachable code).

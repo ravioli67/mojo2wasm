@@ -31,3 +31,4 @@ Thumbs.db
 logs/
 tmp/
 *.zip
+.claude/

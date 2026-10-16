@@ -74,7 +74,7 @@ else:
 | `name` | `String` | Function name (also its WASM export name) |
 | `parameters` | `List[String]` | Parameter names, in order |
 | `parameter_types` | `List[String]` | `"Int"`, `"Float64"` or `"Bool"` for each parameter |
-| `return_type` | `String` | `"Int"`, `"Float64"` or `"Bool"` |
+| `return_type` | `String` | `"Int"`, `"Float64"`, `"Bool"`, or `"None"` for a function without a return type |
 | `parameter_count()` | `Int` | Number of parameters |
 | `signature()` | `String` | e.g. `add(a: Int, b: Int) -> Int` |
 
@@ -156,6 +156,39 @@ def fib_iter(n: Int) -> Int
 | `Int` | `i64` | `BigInt` (`add(2n, 3n)`) |
 | `Float64` | `f64` | `number` |
 | `Bool` | `i32` | `0` or `1` |
+| no return type | no result | `undefined` |
+
+## Running programs that print
+
+A program that calls `print` needs the host to provide four functions in the
+import module `env`, and it exports its `memory` so the host can read string
+literals. Only the ones a program uses are imported.
+
+| Import | Parameters | Meaning |
+|--------|------------|---------|
+| `print_i64` | `i64` | print an `Int` |
+| `print_f64` | `f64` | print a `Float64` |
+| `print_bool` | `i32` | print `True` (non-zero) or `False` |
+| `print_str` | `i32` pointer, `i32` length | print UTF-8 text from `memory` |
+
+The program itself puts the spaces between arguments and the final newline
+(by calling `print_str`), so the host just writes what it receives. A minimal
+host in JavaScript (the full version, which also formats floats the way Mojo
+does, is `tests/host.js`):
+
+```js
+let memory;
+const env = {
+  print_i64: (v) => process.stdout.write(String(v)),
+  print_f64: (v) => process.stdout.write(String(v)),
+  print_bool: (v) => process.stdout.write(v ? "True" : "False"),
+  print_str: (ptr, len) =>
+    process.stdout.write(new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len))),
+};
+const { instance } = await WebAssembly.instantiate(bytes, { env });
+memory = instance.exports.memory;
+instance.exports.main();
+```
 
 ## Utilities
 

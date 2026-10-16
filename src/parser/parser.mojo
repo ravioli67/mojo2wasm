@@ -2,10 +2,13 @@ from ..lexer.tokens import Token
 from ..util.diagnostics import error_at
 from .ast import Parameter
 from .ast import Function
+from .ast import AliasDecl
 from .ast import Module
 from .ast import int_expr
 from .ast import float_expr
 from .ast import bool_expr
+from .ast import string_expr
+from .ast import ternary_expr
 from .ast import var_expr
 from .ast import neg_expr
 from .ast import not_expr
@@ -20,6 +23,10 @@ from .ast import var_stmt
 from .ast import assign_stmt
 from .ast import break_stmt
 from .ast import continue_stmt
+from .ast import pass_stmt
+from .ast import expr_stmt
+from .ast import print_stmt
+from .ast import for_stmt
 
 
 def is_comparison(kind: String) -> Bool:
@@ -97,6 +104,8 @@ def describe(token: Token) -> String:
         return "an unexpected indent"
     if token.kind == "DEDENT":
         return "the end of the block"
+    if token.kind == "STRING":
+        return "a string"
     if token.kind == "IDENTIFIER":
         return "the name '" + token.lexeme + "'"
     if token.kind == "INTEGER" or token.kind == "FLOAT":
@@ -190,15 +199,23 @@ struct Parser:
 
     Grammar (NEWLINE / INDENT / DEDENT come from the lexer):
 
-      module         := (function)* EOF
-      function       := "def" IDENT "(" [param ("," param)*] ")" "->" type
-                        ":" block
+      module         := (alias | function | STRING)* EOF
+      alias          := ("alias" | "comptime") IDENT [":" type] "=" expr
+                        NEWLINE
+      function       := ("def" | "fn") IDENT "(" [param ("," param)*] ")"
+                        ["raises"] ["->" (type | "None")] ":" block
       param          := IDENT ":" type
       type           := "Int" | "Float64" | "Bool"
       block          := NEWLINE INDENT statement+ DEDENT
-      statement      := "return" expr NEWLINE
+      statement      := "return" [expr] NEWLINE
                       | if
                       | "while" expr ":" block
+                      | "for" IDENT "in" "range" "(" expr ["," expr
+                        ["," INTEGER]] ")" ":" block
+                      | "print" "(" [expr ("," expr)*] ")" NEWLINE
+                      | call NEWLINE                  (result ignored)
+                      | "pass" NEWLINE
+                      | STRING NEWLINE                (docstring, ignored)
                       | "var" IDENT [":" type] "=" expr NEWLINE
                       | IDENT "=" expr NEWLINE
                       | IDENT ("+=" | "-=" | "*=" | "/=" | "//=" | "%=")
@@ -208,14 +225,15 @@ struct Parser:
       if             := ("if" | "elif") expr ":" block [ if_tail ]
       if_tail        := "elif" ...   |   "else" ":" block
 
-      expr           := and_expr ("or" and_expr)*
+      expr           := or_expr ["if" or_expr "else" expr]
+      or_expr        := and_expr ("or" and_expr)*
       and_expr       := not_expr ("and" not_expr)*
       not_expr       := "not" not_expr | comparison
       comparison     := additive [("<"|"<="|">"|">="|"=="|"!=") additive]
       additive       := multiplicative (("+"|"-") multiplicative)*
       multiplicative := unary (("*"|"/"|"//"|"%") unary)*
       unary          := "-" unary | primary
-      primary        := INTEGER | FLOAT | "True" | "False"
+      primary        := INTEGER | FLOAT | STRING | "True" | "False"
                       | IDENT | IDENT "(" [expr ("," expr)*] ")"
                       | type "(" expr ")"            (conversion)
                       | "(" expr ")"
@@ -279,11 +297,39 @@ struct Parser:
         self.skip_newlines()
 
         while not self.check("EOF"):
-            var function = self.parse_function()
-            self.module.functions.append(function^)
+            if self.check("STRING"):
+                # A module docstring: ignored.
+                _ = self.advance()
+                _ = self.expect("NEWLINE")
+            elif self.check("ALIAS"):
+                self.parse_alias()
+            elif self.check("DEF"):
+                var function = self.parse_function()
+                self.module.functions.append(function^)
+            else:
+                raise self.fail(
+                    self.peek(),
+                    "expected 'def', 'fn' or 'alias' at the top level but"
+                    " found "
+                    + describe(self.peek()),
+                )
             self.skip_newlines()
 
         return self.module.copy()
+
+    def parse_alias(mut self) raises:
+        _ = self.advance()  # "alias" / "comptime"
+        var name = self.expect("IDENTIFIER")
+        var type_name = String("")
+        if self.check("COLON"):
+            _ = self.advance()
+            type_name = self.parse_type()
+        _ = self.expect("ASSIGN")
+        var value = self.parse_expr()
+        _ = self.expect("NEWLINE")
+        self.module.aliases.append(
+            AliasDecl(name.lexeme, type_name, value, name.line, name.column)
+        )
 
     def parse_type(mut self) raises -> String:
         var token = self.advance()
@@ -311,9 +357,18 @@ struct Parser:
                 parameters.append(self.parse_parameter())
 
         _ = self.expect("RPAREN")
-        _ = self.expect("ARROW")
 
-        var return_type = self.parse_type()
+        if self.check("RAISES"):
+            _ = self.advance()  # accepted and ignored
+
+        # No `-> type` (or `-> None`) means the function returns nothing.
+        var return_type = String("")
+        if self.check("ARROW"):
+            _ = self.advance()
+            if self.check("NONE"):
+                _ = self.advance()
+            else:
+                return_type = self.parse_type()
 
         _ = self.expect("COLON")
 
@@ -372,7 +427,9 @@ struct Parser:
 
         if kind == "RETURN":
             _ = self.advance()
-            var value = self.parse_expr()
+            var value = -1
+            if not self.check("NEWLINE"):
+                value = self.parse_expr()
             _ = self.expect("NEWLINE")
             return self.module.add_stmt(
                 return_stmt(value, token.line, token.column)
@@ -390,8 +447,22 @@ struct Parser:
                 continue_stmt(token.line, token.column)
             )
 
+        if kind == "PASS":
+            _ = self.advance()
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(pass_stmt(token.line, token.column))
+
+        if kind == "STRING":
+            # A docstring (or any bare string): ignored.
+            _ = self.advance()
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(pass_stmt(token.line, token.column))
+
         if kind == "IF":
             return self.parse_if()
+
+        if kind == "FOR":
+            return self.parse_for()
 
         if kind == "WHILE":
             _ = self.advance()
@@ -441,9 +512,132 @@ struct Parser:
                 assign_stmt(name.lexeme, combined, name.line, name.column)
             )
 
+        if (
+            kind == "IDENTIFIER"
+            and token.lexeme == "print"
+            and self.peek_at(1).kind == "LPAREN"
+        ):
+            _ = self.advance()
+            _ = self.advance()  # "("
+            var args = List[Int]()
+            if not self.check("RPAREN"):
+                args.append(self.parse_expr())
+                while self.check("COMMA"):
+                    _ = self.advance()
+                    args.append(self.parse_expr())
+            _ = self.expect("RPAREN")
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(
+                print_stmt(args, token.line, token.column)
+            )
+
+        if kind == "IDENTIFIER" and self.peek_at(1).kind == "LPAREN":
+            # A call whose result is ignored.
+            var call = self.parse_expr()
+            _ = self.expect("NEWLINE")
+            return self.module.add_stmt(
+                expr_stmt(call, token.line, token.column)
+            )
+
+        if (
+            kind == "IDENTIFIER"
+            or kind == "INTEGER"
+            or kind == "FLOAT"
+            or kind == "LPAREN"
+            or kind == "TRUE"
+            or kind == "FALSE"
+            or kind == "MINUS"
+            or kind == "NOT"
+            or is_type_kind(kind)
+        ):
+            raise self.fail(
+                token,
+                "this is not a statement. A statement can be an assignment"
+                " (x = ...), a function call (f(x)) or start with a keyword"
+                " such as 'return' or 'if'",
+            )
+
         raise self.fail(
             token,
             "unexpected " + describe(token) + " at the start of a statement",
+        )
+
+    def parse_for(mut self) raises -> Int:
+        # for NAME in range(stop) / range(start, stop) / range(start, stop, step)
+        var token = self.advance()
+        var variable = self.expect("IDENTIFIER")
+        _ = self.expect("IN")
+        var range_token = self.expect("IDENTIFIER")
+
+        if range_token.lexeme != "range":
+            raise self.fail(
+                range_token,
+                "only 'for ... in range(...)' loops are supported for now",
+            )
+
+        _ = self.expect("LPAREN")
+        var arguments = List[Int]()
+        if not self.check("RPAREN"):
+            arguments.append(self.parse_expr())
+            while self.check("COMMA"):
+                _ = self.advance()
+                arguments.append(self.parse_expr())
+        _ = self.expect("RPAREN")
+
+        if len(arguments) == 0 or len(arguments) > 3:
+            raise self.fail(range_token, "range() takes 1 to 3 arguments")
+
+        # The step must be a literal so the direction of the loop is known.
+        var step = 1
+        if len(arguments) == 3:
+            var third = self.module.exprs[arguments[2]].copy()
+            if third.kind == "INT":
+                step = third.value
+            elif third.kind == "NEG" and self.module.exprs[third.left].kind == "INT":
+                step = 0 - self.module.exprs[third.left].value
+            else:
+                raise Error(
+                    error_at(
+                        "Parser",
+                        third.line,
+                        third.column,
+                        "the step of range() must be an integer literal (like"
+                        " 2 or -1)",
+                    )
+                )
+            if step == 0:
+                raise Error(
+                    error_at(
+                        "Parser",
+                        third.line,
+                        third.column,
+                        "the step of range() cannot be 0",
+                    )
+                )
+
+        # Normalize to [start, stop].
+        var bounds = List[Int]()
+        if len(arguments) == 1:
+            bounds.append(
+                self.module.add_expr(int_expr(0, token.line, token.column))
+            )
+            bounds.append(arguments[0])
+        else:
+            bounds.append(arguments[0])
+            bounds.append(arguments[1])
+
+        _ = self.expect("COLON")
+        var body = self.parse_block()
+
+        return self.module.add_stmt(
+            for_stmt(
+                variable.lexeme,
+                bounds,
+                body,
+                step,
+                variable.line,
+                variable.column,
+            )
         )
 
     def parse_if(mut self) raises -> Int:
@@ -468,7 +662,21 @@ struct Parser:
     # ---- Expressions (each returns an index into Module.exprs) ------------
 
     def parse_expr(mut self) raises -> Int:
-        return self.parse_or()
+        var value = self.parse_or()
+
+        # a if condition else b
+        if self.check("IF"):
+            var operator = self.advance()
+            var condition = self.parse_or()
+            _ = self.expect("ELSE")
+            var other = self.parse_expr()
+            return self.module.add_expr(
+                ternary_expr(
+                    value, other, condition, operator.line, operator.column
+                )
+            )
+
+        return value
 
     def parse_or(mut self) raises -> Int:
         var left = self.parse_and()
@@ -601,6 +809,12 @@ struct Parser:
             var value = parse_float_text(token.lexeme, token.line, token.column)
             return self.module.add_expr(
                 float_expr(token.lexeme, value, token.line, token.column)
+            )
+
+        if kind == "STRING":
+            _ = self.advance()
+            return self.module.add_expr(
+                string_expr(token.lexeme, token.line, token.column)
             )
 
         if kind == "TRUE" or kind == "FALSE":

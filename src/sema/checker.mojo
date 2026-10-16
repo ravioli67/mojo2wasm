@@ -8,19 +8,70 @@ def semantic_error(line: Int, column: Int, message: String) -> Error:
     return Error(error_at("Semantic", line, column, message))
 
 
-def lookup(names: List[String], types: List[String], name: String) -> String:
-    """The type of variable `name`, or "" if it is not in scope."""
-    for i in range(len(names)):
-        if names[i] == name:
-            return types[i]
-    return ""
+struct Scope(Copyable, Movable):
+    """The variables visible at one point of a function.
 
+    `names` / `types` / `slots` describe the variables in scope, innermost
+    last; leaving a block removes the ones it declared (so a name can be
+    reused in a sibling block). `slot_names` / `slot_types` list EVERY local
+    the function has ever declared (parameters first), because each
+    declaration gets its own WASM local, even when it reuses a name.
+    """
 
-def contains(names: List[String], name: String) -> Bool:
-    for i in range(len(names)):
-        if names[i] == name:
-            return True
-    return False
+    var names: List[String]
+    var types: List[String]
+    var slots: List[Int]
+    var slot_names: List[String]
+    var slot_types: List[String]
+
+    def __init__(out self):
+        self.names = List[String]()
+        self.types = List[String]()
+        self.slots = List[Int]()
+        self.slot_names = List[String]()
+        self.slot_types = List[String]()
+
+    def declare(mut self, name: String, type_name: String) -> Int:
+        """Adds a visible variable and returns its slot."""
+        var slot = len(self.slot_names)
+        self.slot_names.append(name)
+        self.slot_types.append(type_name)
+        self.names.append(name)
+        self.types.append(type_name)
+        self.slots.append(slot)
+        return slot
+
+    def hidden(mut self, name: String, type_name: String) -> Int:
+        """Adds a slot the program cannot name (e.g. a loop counter)."""
+        var slot = len(self.slot_names)
+        self.slot_names.append(name)
+        self.slot_types.append(type_name)
+        return slot
+
+    def find(self, name: String) -> Int:
+        """Position in `names` of the innermost variable called `name`."""
+        var i = len(self.names) - 1
+        while i >= 0:
+            if self.names[i] == name:
+                return i
+            i -= 1
+        return -1
+
+    def mark(self) -> Int:
+        return len(self.names)
+
+    def leave(mut self, mark: Int):
+        """Forgets every variable declared since `mark`."""
+        while len(self.names) > mark:
+            _ = self.names.pop()
+            _ = self.types.pop()
+            _ = self.slots.pop()
+
+    def declared_in_block(self, name: String, start: Int) -> Bool:
+        for i in range(start, len(self.names)):
+            if self.names[i] == name:
+                return True
+        return False
 
 
 def is_order_comparison(op: String) -> Bool:
@@ -57,18 +108,58 @@ def conversion_allowed(target: String, source: String) -> Bool:
     return False
 
 
-def check_expr(
-    mut module: Module,
-    index: Int,
-    names: List[String],
-    types: List[String],
-) raises -> String:
-    """Checks one expression, records its type in `Expr.etype` and returns it.
-
-    Types are "Int", "Float64" and "Bool".
-    """
+def is_constant(module: Module, index: Int) -> Bool:
+    """True if the expression only uses literals and other aliases."""
     var expr = module.exprs[index].copy()
-    var result = check_expr_inner(module, expr, names, types)
+    var kind = expr.kind
+
+    if not (
+        kind == "INT"
+        or kind == "FLOAT"
+        or kind == "BOOL"
+        or kind == "VAR"
+        or kind == "ALIAS"
+        or kind == "NEG"
+        or kind == "NOT"
+        or kind == "BINARY"
+        or kind == "LOGIC"
+        or kind == "CAST"
+    ):
+        return False
+
+    if expr.left >= 0 and kind != "ALIAS":
+        if not is_constant(module, expr.left):
+            return False
+    if expr.right >= 0:
+        if not is_constant(module, expr.right):
+            return False
+
+    return True
+
+
+def check_expr(
+    mut module: Module, index: Int, scope: Scope
+) raises -> String:
+    """Checks an expression that must produce a value; returns its type."""
+    var result = check_expr_any(module, index, scope)
+    if result == "None":
+        var call = module.exprs[index].copy()
+        raise semantic_error(
+            call.line,
+            call.column,
+            "'" + call.name + "' does not return a value",
+        )
+    return result
+
+
+def check_expr_any(
+    mut module: Module, index: Int, scope: Scope
+) raises -> String:
+    """Checks one expression, records its type in `Expr.etype` and returns
+    it. The type is "Int", "Float64", "Bool", or "None" for a call to a
+    function without a return type."""
+    var expr = module.exprs[index].copy()
+    var result = check_expr_inner(module, expr, scope)
 
     expr.etype = result
     module.exprs[index] = expr^
@@ -77,10 +168,7 @@ def check_expr(
 
 
 def check_expr_inner(
-    mut module: Module,
-    expr: Expr,
-    names: List[String],
-    types: List[String],
+    mut module: Module, mut expr: Expr, scope: Scope
 ) raises -> String:
     var kind = expr.kind
 
@@ -93,21 +181,39 @@ def check_expr_inner(
     if kind == "BOOL":
         return "Bool"
 
+    if kind == "STRING":
+        raise semantic_error(
+            expr.line,
+            expr.column,
+            "string literals can only be used as arguments to print() for now",
+        )
+
     if kind == "VAR":
-        var found = lookup(names, types, expr.name)
-        if found == "":
-            raise semantic_error(
-                expr.line,
-                expr.column,
-                "unknown variable '"
-                + expr.name
-                + "'."
-                + suggest(expr.name, names),
-            )
-        return found
+        var found = scope.find(expr.name)
+        if found >= 0:
+            expr.value = scope.slots[found]
+            return scope.types[found]
+
+        var alias_index = module.find_alias(expr.name, module.visible_aliases)
+        if alias_index >= 0:
+            expr.kind = "ALIAS"
+            expr.left = alias_index
+            return module.aliases[alias_index].type_name
+
+        var candidates = scope.names.copy()
+        for i in range(module.visible_aliases):
+            candidates.append(module.aliases[i].name)
+        raise semantic_error(
+            expr.line,
+            expr.column,
+            "unknown variable '"
+            + expr.name
+            + "'"
+            + suggest(expr.name, candidates),
+        )
 
     if kind == "NEG":
-        var operand = check_expr(module, expr.left, names, types)
+        var operand = check_expr(module, expr.left, scope)
         if not is_number_type(operand):
             raise semantic_error(
                 expr.line, expr.column, "cannot negate a " + operand
@@ -115,7 +221,7 @@ def check_expr_inner(
         return operand
 
     if kind == "NOT":
-        var operand = check_expr(module, expr.left, names, types)
+        var operand = check_expr(module, expr.left, scope)
         if operand != "Bool":
             raise semantic_error(
                 expr.line,
@@ -125,8 +231,8 @@ def check_expr_inner(
         return "Bool"
 
     if kind == "LOGIC":
-        var left = check_expr(module, expr.left, names, types)
-        var right = check_expr(module, expr.right, names, types)
+        var left = check_expr(module, expr.left, scope)
+        var right = check_expr(module, expr.right, scope)
         if left != "Bool" or right != "Bool":
             raise semantic_error(
                 expr.line,
@@ -140,9 +246,33 @@ def check_expr_inner(
             )
         return "Bool"
 
+    if kind == "TERNARY":
+        var condition_index = expr.args[0]
+        var condition = check_expr(module, condition_index, scope)
+        if condition != "Bool":
+            var condition_expr = module.exprs[condition_index].copy()
+            raise semantic_error(
+                condition_expr.line,
+                condition_expr.column,
+                "the condition of 'if ... else' must be a Bool, not "
+                + condition,
+            )
+        var when_true = check_expr(module, expr.left, scope)
+        var when_false = check_expr(module, expr.right, scope)
+        if when_true != when_false:
+            raise semantic_error(
+                expr.line,
+                expr.column,
+                "both sides of 'if ... else' must have the same type but got "
+                + when_true
+                + " and "
+                + when_false,
+            )
+        return when_true
+
     if kind == "BINARY":
-        var left = check_expr(module, expr.left, names, types)
-        var right = check_expr(module, expr.right, names, types)
+        var left = check_expr(module, expr.left, scope)
+        var right = check_expr(module, expr.right, scope)
         var op = expr.op
 
         if op == "+" or op == "-" or op == "*":
@@ -187,7 +317,7 @@ def check_expr_inner(
         raise mismatch_error(op, expr.line, expr.column, left, right)
 
     if kind == "CAST":
-        var source = check_expr(module, expr.left, names, types)
+        var source = check_expr(module, expr.left, scope)
         if not conversion_allowed(expr.name, source):
             raise semantic_error(
                 expr.line,
@@ -207,7 +337,7 @@ def check_expr_inner(
             expr.column,
             "unknown function '"
             + expr.name
-            + "'."
+            + "'"
             + suggest(expr.name, function_names),
         )
 
@@ -227,7 +357,7 @@ def check_expr_inner(
         )
 
     for i in range(len(expr.args)):
-        var argument_type = check_expr(module, expr.args[i], names, types)
+        var argument_type = check_expr(module, expr.args[i], scope)
         var wanted = function.parameters[i].type_name
         if argument_type != wanted:
             var argument = module.exprs[expr.args[i]].copy()
@@ -244,38 +374,72 @@ def check_expr_inner(
                 + argument_type,
             )
 
+    if function.return_type == "":
+        return "None"
     return function.return_type
+
+
+def check_sub_block(
+    mut module: Module,
+    body: List[Int],
+    mut scope: Scope,
+    in_loop: Bool,
+    return_type: String,
+) raises:
+    """Checks a nested block: variables it declares disappear afterwards."""
+    var mark = scope.mark()
+    check_block(module, body, scope, mark, in_loop, return_type)
+    scope.leave(mark)
 
 
 def check_block(
     mut module: Module,
     body: List[Int],
-    mut names: List[String],
-    mut types: List[String],
+    mut scope: Scope,
+    start: Int,
     in_loop: Bool,
     return_type: String,
 ) raises:
     """Checks a list of statements.
 
-    Variables live for the whole function once declared (no block scopes
-    yet), so `names` / `types` just keep growing as `var` statements are
-    seen. `in_loop` is True inside a `while` body (where break/continue are
-    legal).
+    `start` is where this block's own variables begin in `scope` (declaring
+    the same name twice within one block is an error, but a nested block may
+    shadow an outer variable). `in_loop` is True inside a loop body, where
+    break/continue are legal.
     """
     for i in range(len(body)):
         var stmt = module.stmts[body[i]].copy()
 
         if stmt.kind == "RETURN":
-            var value_type = check_expr(module, stmt.expr, names, types)
-            if value_type != return_type:
-                raise semantic_error(
-                    stmt.line,
-                    stmt.column,
-                    "this function returns "
-                    + return_type
-                    + " but the value is "
-                    + value_type,
-                )
+            if stmt.expr == -1:
+                if return_type != "":
+                    raise semantic_error(
+                        stmt.line,
+                        stmt.column,
+                        "this function must return a value of type "
+                        + return_type,
+                    )
+            else:
+                var value_type = check_expr(module, stmt.expr, scope)
+                if return_type == "":
+                    raise semantic_error(
+                        stmt.line,
+                        stmt.column,
+                        "this function has no return type, so it cannot"
+                        " return a value",
+                    )
+                if value_type != return_type:
+                    raise semantic_error(
+                        stmt.line,
+                        stmt.column,
+                        "this function returns "
+                        + return_type
+                        + " but the value is "
+                        + value_type,
+                    )
+
+        elif stmt.kind == "PASS":
+            pass
 
         elif stmt.kind == "BREAK" or stmt.kind == "CONTINUE":
             if not in_loop:
@@ -286,7 +450,7 @@ def check_block(
                 )
 
         elif stmt.kind == "IF" or stmt.kind == "WHILE":
-            var condition_type = check_expr(module, stmt.expr, names, types)
+            var condition_type = check_expr(module, stmt.expr, scope)
             if condition_type != "Bool":
                 raise semantic_error(
                     stmt.line,
@@ -295,25 +459,67 @@ def check_block(
                     + condition_type,
                 )
             if stmt.kind == "WHILE":
-                check_block(
-                    module, stmt.body, names, types, True, return_type
-                )
+                check_sub_block(module, stmt.body, scope, True, return_type)
             else:
-                check_block(
-                    module, stmt.body, names, types, in_loop, return_type
+                check_sub_block(
+                    module, stmt.body, scope, in_loop, return_type
                 )
-                check_block(
-                    module, stmt.else_body, names, types, in_loop, return_type
+                check_sub_block(
+                    module, stmt.else_body, scope, in_loop, return_type
                 )
 
+        elif stmt.kind == "FOR":
+            for a in range(len(stmt.args)):
+                if check_expr(module, stmt.args[a], scope) != "Int":
+                    var bound = module.exprs[stmt.args[a]].copy()
+                    raise semantic_error(
+                        bound.line,
+                        bound.column,
+                        "range() arguments must be Int",
+                    )
+            var mark = scope.mark()
+            # Three consecutive slots: the loop variable, a hidden counter
+            # and a hidden copy of the end value.
+            stmt.slot = scope.declare(stmt.name, "Int")
+            _ = scope.hidden("__for_counter", "Int")
+            _ = scope.hidden("__for_end", "Int")
+            module.stmts[body[i]] = stmt.copy()
+            check_block(module, stmt.body, scope, mark, True, return_type)
+            scope.leave(mark)
+
+        elif stmt.kind == "PRINT":
+            for a in range(len(stmt.args)):
+                var argument = module.exprs[stmt.args[a]].copy()
+                if argument.kind == "STRING":
+                    argument.etype = "String"
+                    module.exprs[stmt.args[a]] = argument^
+                else:
+                    _ = check_expr(module, stmt.args[a], scope)
+
+        elif stmt.kind == "EXPR":
+            var call = module.exprs[stmt.expr].copy()
+            if call.kind != "CALL":
+                raise semantic_error(
+                    call.line,
+                    call.column,
+                    "only a function call can be used as a statement",
+                )
+            _ = check_expr_any(module, stmt.expr, scope)
+
         elif stmt.kind == "VAR":
-            if contains(names, stmt.name):
+            if scope.declared_in_block(stmt.name, start):
                 raise semantic_error(
                     stmt.line,
                     stmt.column,
                     "'" + stmt.name + "' is already declared",
                 )
-            var value_type = check_expr(module, stmt.expr, names, types)
+            if module.find_alias(stmt.name, len(module.aliases)) >= 0:
+                raise semantic_error(
+                    stmt.line,
+                    stmt.column,
+                    "'" + stmt.name + "' is already declared as an alias",
+                )
+            var value_type = check_expr(module, stmt.expr, scope)
             if stmt.type_name != "" and stmt.type_name != value_type:
                 raise semantic_error(
                     stmt.line,
@@ -325,35 +531,42 @@ def check_block(
                     + " but the value is "
                     + value_type,
                 )
-            # Remember the variable's type: the emitter needs it.
+            # Remember the variable's type and slot: the emitter needs them.
             stmt.type_name = value_type
+            stmt.slot = scope.declare(stmt.name, value_type)
             module.stmts[body[i]] = stmt.copy()
-            names.append(stmt.name)
-            types.append(value_type)
 
         else:  # ASSIGN
-            var variable_type = lookup(names, types, stmt.name)
-            if variable_type == "":
+            var found = scope.find(stmt.name)
+            if found < 0:
+                if module.find_alias(stmt.name, len(module.aliases)) >= 0:
+                    raise semantic_error(
+                        stmt.line,
+                        stmt.column,
+                        "cannot assign to the alias '" + stmt.name + "'",
+                    )
                 raise semantic_error(
                     stmt.line,
                     stmt.column,
                     "unknown variable '"
                     + stmt.name
-                    + "'."
-                    + suggest(stmt.name, names),
+                    + "'"
+                    + suggest(stmt.name, scope.names),
                 )
-            var value_type = check_expr(module, stmt.expr, names, types)
-            if value_type != variable_type:
+            var value_type = check_expr(module, stmt.expr, scope)
+            if value_type != scope.types[found]:
                 raise semantic_error(
                     stmt.line,
                     stmt.column,
                     "'"
                     + stmt.name
                     + "' is "
-                    + variable_type
+                    + scope.types[found]
                     + " but the value is "
                     + value_type,
                 )
+            stmt.slot = scope.slots[found]
+            module.stmts[body[i]] = stmt.copy()
 
 
 def always_returns(module: Module, body: List[Int]) -> Bool:
@@ -375,13 +588,55 @@ def always_returns(module: Module, body: List[Int]) -> Bool:
 
 
 def check(mut module: Module) raises:
-    """Validates a parsed module and annotates it with types.
+    """Validates a parsed module and annotates it with types and slots.
 
     Raises an Error on the first problem.
     """
     if len(module.functions) == 0:
         raise Error("Semantic error: the file contains no functions")
 
+    # ---- Aliases (constants), in order -------------------------------------
+    for i in range(len(module.aliases)):
+        var item = module.aliases[i].copy()
+
+        for j in range(i):
+            if module.aliases[j].name == item.name:
+                raise semantic_error(
+                    item.line,
+                    item.column,
+                    "alias '" + item.name + "' is defined twice",
+                )
+
+        module.visible_aliases = i
+
+        var value = module.exprs[item.expr].copy()
+        if not is_constant(module, item.expr):
+            raise semantic_error(
+                value.line,
+                value.column,
+                "an alias must be a constant expression (numbers,"
+                " True/False and other aliases)",
+            )
+
+        var empty = Scope()
+        var value_type = check_expr(module, item.expr, empty)
+        if item.type_name != "" and item.type_name != value_type:
+            raise semantic_error(
+                item.line,
+                item.column,
+                "alias '"
+                + item.name
+                + "' is declared as "
+                + item.type_name
+                + " but the value is "
+                + value_type,
+            )
+        item.type_name = value_type
+        module.aliases[i] = item^
+
+    module.visible_aliases = len(module.aliases)
+
+    # ---- Functions ----------------------------------------------------------
     for i in range(len(module.functions)):
         var function = module.functions[i].copy()
 
@@ -394,35 +649,39 @@ def check(mut module: Module) raises:
                     "function '" + function.name + "' is defined twice",
                 )
 
-        if function.name.startswith("__"):
+        if function.name.startswith("__") or function.name == "print":
             raise semantic_error(
                 function.line,
                 function.column,
-                "function names starting with '__' are reserved ('"
-                + function.name
-                + "')",
+                "the function name '" + function.name + "' is reserved",
             )
 
-        # Parameters become the first entries of the scope.
-        var names = List[String]()
-        var types = List[String]()
+        # Parameters become the first variables in scope.
+        var scope = Scope()
         for p in range(len(function.parameters)):
             var parameter = function.parameters[p].copy()
 
-            if contains(names, parameter.name):
+            if scope.declared_in_block(parameter.name, 0):
                 raise semantic_error(
                     parameter.line,
                     parameter.column,
                     "duplicate parameter '" + parameter.name + "'",
                 )
-            names.append(parameter.name)
-            types.append(parameter.type_name)
+            if module.find_alias(parameter.name, len(module.aliases)) >= 0:
+                raise semantic_error(
+                    parameter.line,
+                    parameter.column,
+                    "'" + parameter.name + "' is already declared as an alias",
+                )
+            _ = scope.declare(parameter.name, parameter.type_name)
 
         check_block(
-            module, function.body, names, types, False, function.return_type
+            module, function.body, scope, 0, False, function.return_type
         )
 
-        if not always_returns(module, function.body):
+        if function.return_type != "" and not always_returns(
+            module, function.body
+        ):
             raise semantic_error(
                 function.line,
                 function.column,
@@ -430,3 +689,7 @@ def check(mut module: Module) raises:
                 + function.name
                 + "' does not return a value on every path",
             )
+
+        function.slot_names = scope.slot_names.copy()
+        function.slot_types = scope.slot_types.copy()
+        module.functions[i] = function^

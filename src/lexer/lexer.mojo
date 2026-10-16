@@ -12,8 +12,20 @@ def is_digit(c: String) -> Bool:
 
 def keyword_kind(word: String) -> String:
     """Token kind for a reserved word, or "" if `word` is not reserved."""
-    if word == "def":
+    if word == "def" or word == "fn":
         return "DEF"
+    if word == "raises":
+        return "RAISES"
+    if word == "for":
+        return "FOR"
+    if word == "in":
+        return "IN"
+    if word == "pass":
+        return "PASS"
+    if word == "alias" or word == "comptime":
+        return "ALIAS"
+    if word == "None":
+        return "NONE"
     if word == "return":
         return "RETURN"
     if word == "if":
@@ -109,6 +121,26 @@ def two_char_kind(pair: String) -> String:
         return "PERCENTEQ"
     if pair == "/=":
         return "SLASHEQ"
+    return ""
+
+
+def escape_char(c: String) -> String:
+    """The character that an escape such as backslash-n stands for, or ""
+    if the escape is unknown."""
+    if c == "n":
+        return "\n"
+    if c == "t":
+        return "\t"
+    if c == "r":
+        return "\r"
+    if c == "0":
+        return "\0"
+    if c == "\\":
+        return "\\"
+    if c == "\"":
+        return "\""
+    if c == "'":
+        return "'"
     return ""
 
 
@@ -214,6 +246,87 @@ def lex(source: String) raises -> List[Token]:
             i += 1
             line += 1
             line_start = i
+            continue
+
+        # ---- String literal: "text", 'text' or """text""" -----------------
+        if c == "\"" or c == "'":
+            var quote = c
+            var triple = (
+                i + 2 < n
+                and source[i + 1] == quote
+                and source[i + 2] == quote
+            )
+            var start_line = line
+            var start_column = column
+            var j = i + 1
+            if triple:
+                j = i + 3
+            var text = String("")
+
+            while True:
+                if j >= n:
+                    raise Error(
+                        error_at(
+                            "Lexer",
+                            start_line,
+                            start_column,
+                            "this string is never closed",
+                        )
+                    )
+
+                var ch = source[j]
+
+                if (
+                    triple
+                    and ch == quote
+                    and j + 2 < n
+                    and source[j + 1] == quote
+                    and source[j + 2] == quote
+                ):
+                    j += 3
+                    break
+                if (not triple) and ch == quote:
+                    j += 1
+                    break
+                if (not triple) and ch == "\n":
+                    raise Error(
+                        error_at(
+                            "Lexer",
+                            start_line,
+                            start_column,
+                            (
+                                "this string is never closed (use triple quotes"
+                                " for strings that span lines)"
+                            ),
+                        )
+                    )
+
+                if ch == "\\":
+                    var escaped = String("")
+                    if j + 1 < n:
+                        escaped = source[j + 1]
+                    var replacement = escape_char(escaped)
+                    if escaped == "" or replacement == "":
+                        raise Error(
+                            error_at(
+                                "Lexer",
+                                line,
+                                j - line_start + 1,
+                                "unknown escape sequence '\\" + escaped + "'",
+                            )
+                        )
+                    text += replacement
+                    j += 2
+                    continue
+
+                if ch == "\n":
+                    line += 1
+                    line_start = j + 1
+                text += ch
+                j += 1
+
+            tokens.append(Token("STRING", text, start_line, start_column))
+            i = j
             continue
 
         # ---- Identifier or keyword ----------------------------------------

@@ -4,17 +4,18 @@
 //   mojo -I . main.mojo build examples/features.mojo  build/features.wasm
 //   mojo -I . main.mojo build examples/logic.mojo     build/logic.wasm
 //   mojo -I . main.mojo build examples/types.mojo     build/types.wasm
+//   mojo -I . main.mojo build examples/hello.mojo     build/hello.wasm
+//   mojo -I . main.mojo build examples/language.mojo  build/language.wasm
 //   node tests/behavior.js build
 //
 // From JavaScript: Int is a BigInt, Float64 is a number, Bool is 0 or 1.
-const fs = require("fs");
+const { loadWasm } = require("./host.js");
 const dir = process.argv[2] || "build";
 
-const load = (name) => {
-  const bytes = fs.readFileSync(`${dir}/${name}.wasm`);
-  if (!WebAssembly.validate(bytes)) throw new Error(`${name}.wasm is not valid WebAssembly`);
-  return new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
-};
+// Everything the programs print() is collected here.
+let output = "";
+const take = () => { const text = output; output = ""; return text; };
+const load = (name) => loadWasm(`${dir}/${name}.wasm`, (text) => { output += text; });
 
 let fails = 0, checks = 0;
 const eq = (name, got, want) => {
@@ -23,6 +24,7 @@ const eq = (name, got, want) => {
 };
 
 const Fi = load("fibonacci"), F = load("features"), L = load("logic"), T = load("types");
+const H = load("hello"), G = load("language");
 const near = (name, got, want) => {
   checks++;
   if (Math.abs(got - want) > 1e-9 * Math.max(1, Math.abs(want))) { fails++; console.log(`FAIL ${name}: got ${got}, want ${want}`); }
@@ -102,6 +104,33 @@ eq("bool_to_int(1)", T.bool_to_int(1), 1n); eq("bool_to_int(0)", T.bool_to_int(0
 eq("int_to_bool(5)", T.int_to_bool(5n), 1); eq("int_to_bool(0)", T.int_to_bool(0n), 0); eq("int_to_bool(-3)", T.int_to_bool(-3n), 1);
 eq("in_unit_range(0.5)", T.in_unit_range(0.5), 1); eq("in_unit_range(1.5)", T.in_unit_range(1.5), 0); eq("in_unit_range(-0.1)", T.in_unit_range(-0.1), 0);
 eq("count_primes_below(30)", T.count_primes_below(30n), 10n); eq("count_primes_below(100)", T.count_primes_below(100n), 25n);
+
+// ---- print(), strings, void functions ----
+H.main();
+eq("hello output", take(), "Hello, Mojo!\nThe answer is 42\n3.5 True 7\n\n");
+
+// ---- for loops, alias, ternary, block scoping, fn ----
+eq("sum_to(10)", G.sum_to(10n), 55n); eq("sum_to(0)", G.sum_to(0n), 0n);
+eq("count_even(10)", G.count_even(10n), 5n); eq("count_even(7)", G.count_even(7n), 4n);
+eq("first_multiple(7, 20)", G.first_multiple(7n, 20n), 21n);
+eq("first_multiple none", G.first_multiple(5000n, 1n), -1n);
+take(); G.countdown(); eq("countdown", take(), "5\n4\n3\n2\n1\nliftoff\n");
+G.evens(); eq("evens", take(), "0\n2\n4\n6\n8\n");
+eq("two_loops (reuses `i`)", G.two_loops(), 36n);
+eq("nested", G.nested(5n), 10n);
+eq("shadowing", G.shadowing(), 1n);
+eq("max_of", G.max_of(3n, 9n), 9n); eq("max_of swapped", G.max_of(9n, 3n), 9n);
+eq("abs_float(-2.5)", G.abs_float(-2.5), 2.5); eq("abs_float(2.5)", G.abs_float(2.5), 2.5);
+eq("grade", [95n, 85n, 75n, 50n].map((x) => G.grade(x)).join(), "4,3,2,0");
+eq("scaled (alias)", G.scaled(2), 5);
+eq("limits (aliases)", G.limits(), 30n);
+take(); eq("use_result", G.use_result(), 42n);
+eq("use_result output", take(), "doubling 21\ndoubling 5\n");
+G.fizzbuzz(15n);
+eq("fizzbuzz", take(), "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz\n");
+G.early(-1n); eq("early(-1)", take(), "negative\n");
+G.early(3n); eq("early(3)", take(), "ok 3\n");
+eq("void function returns nothing", G.noop(), undefined);
 
 console.log(fails === 0 ? `ALL ${checks} CHECKS PASSED` : `${fails} of ${checks} CHECKS FAILED`);
 process.exit(fails === 0 ? 0 : 1);
